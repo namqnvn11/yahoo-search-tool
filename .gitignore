@@ -1,6 +1,5 @@
-# Cau hinh rieng tu (chua credentials va thong tin ca nhan)
+# Cau hinh rieng tu (chua thong tin ca nhan)
 .env
-credentials.json
 
 # Log theo ngay
 logs/
