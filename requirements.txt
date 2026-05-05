@@ -1,0 +1,5 @@
+playwright==1.49.1
+gspread==6.1.4
+google-auth==2.37.0
+python-dotenv==1.0.1
+schedule==1.2.2

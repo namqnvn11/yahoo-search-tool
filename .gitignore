@@ -1,0 +1,23 @@
+# Cau hinh rieng tu (chua credentials va thong tin ca nhan)
+.env
+credentials.json
+
+# Log theo ngay
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Playwright
+playwright-report/
+test-results/
+
+# IDE
+.vscode/
+.idea/
+*.swp

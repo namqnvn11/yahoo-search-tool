@@ -1,0 +1,377 @@
+"""
+main.py - Chuong trinh chinh: doc sheet, lap lich va thuc hien search Yahoo Japan.
+
+Su dung:
+    python main.py              # Chay tuan tu, moi nhom cach nhau 1 tieng (tu dong tiep tuc khi restart)
+    python main.py --all        # Chay tat ca cac nhom lien tuc (khong doi)
+    python main.py --test-sheet # Chi hien thi du lieu tu sheet, khong search
+"""
+
+import os
+import sys
+import json
+import time
+import asyncio
+import argparse
+import subprocess
+import urllib.request
+from datetime import datetime, date, timedelta
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from sheet_reader import get_search_tasks, SearchTask
+from searcher import execute_tasks
+
+LOG_DIR = Path("logs")
+
+
+def load_config() -> dict:
+    """Load cau hinh tu .env file."""
+    load_dotenv()
+    
+    port = os.getenv("EDGE_REMOTE_DEBUGGING_PORT", "9222")
+    config = {
+        "credentials_file": os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json"),
+        "sheet_id": os.getenv("SHEET_ID", ""),
+        "sheet_name": os.getenv("SHEET_NAME", "Sheet1"),
+        "user_name": os.getenv("USER_NAME", ""),
+        "cdp_url": os.getenv("EDGE_CDP_URL", f"http://localhost:{port}"),
+        "mobile_ua": os.getenv("MOBILE_USER_AGENT", ""),
+        "edge_executable": os.getenv("EDGE_EXECUTABLE_PATH", ""),
+        "edge_user_data_dir": os.getenv("EDGE_USER_DATA_DIR", ""),
+        "edge_profile_directory": os.getenv("EDGE_PROFILE_DIRECTORY", "Default"),
+        "edge_port": port,
+    }
+
+    # Kiem tra cau hinh bat buoc
+    missing = []
+    if not config["sheet_id"]:
+        missing.append("SHEET_ID")
+    if not config["user_name"]:
+        missing.append("USER_NAME")
+    if not config["mobile_ua"]:
+        missing.append("MOBILE_USER_AGENT")
+    
+    if missing:
+        print(f"[ERROR] Thieu cau hinh trong .env: {', '.join(missing)}")
+        print("Vui long copy .env.example thanh .env va dien day du thong tin.")
+        sys.exit(1)
+    
+    if not os.path.exists(config["credentials_file"]):
+        print(f"[ERROR] Khong tim thay file credentials: {config['credentials_file']}")
+        print("Vui long dat file Google Service Account credentials JSON vao thu muc goc.")
+        sys.exit(1)
+    
+    return config
+
+
+def is_cdp_port_open(cdp_url: str) -> bool:
+    """Kiem tra xem trinh duyet co dang chay va lang nghe tren cong CDP khong."""
+    try:
+        url = cdp_url.rstrip("/") + "/json/version"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def ensure_edge_running(config: dict) -> None:
+    """
+    Kiem tra Edge da chay voi cong CDP chua.
+    Neu chua, tu dong mo Edge voi profile da cau hinh trong .env.
+    """
+    cdp_url = config["cdp_url"]
+
+    if is_cdp_port_open(cdp_url):
+        print(f"[BROWSER] Edge da san sang tai {cdp_url}")
+        return
+
+    print(f"[BROWSER] Chua tim thay Edge tren {cdp_url}. Dang mo...")
+
+    edge_exe = config["edge_executable"]
+    if not edge_exe or not os.path.exists(edge_exe):
+        print(f"[ERROR] Khong tim thay Edge: '{edge_exe}'")
+        print("Vui long kiem tra EDGE_EXECUTABLE_PATH trong .env")
+        sys.exit(1)
+
+    cmd = [
+        edge_exe,
+        f"--remote-debugging-port={config['edge_port']}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    if config["edge_user_data_dir"]:
+        cmd.append(f"--user-data-dir={config['edge_user_data_dir']}")
+    if config["edge_profile_directory"]:
+        cmd.append(f"--profile-directory={config['edge_profile_directory']}")
+
+    subprocess.Popen(cmd)
+
+    print("[BROWSER] Dang cho Edge khoi dong", end="", flush=True)
+    for _ in range(15):
+        time.sleep(1)
+        print(".", end="", flush=True)
+        if is_cdp_port_open(cdp_url):
+            print(" San sang!")
+            return
+
+    print()
+    print(f"[ERROR] Edge khong phan hoi sau 15 giay. Kiem tra lai cau hinh.")
+    sys.exit(1)
+
+
+def get_log_path(target_date: date | None = None) -> Path:
+    """Tra ve duong dan file log theo ngay."""
+    if target_date is None:
+        target_date = date.today()
+    return LOG_DIR / f"{target_date.isoformat()}.json"
+
+
+def init_daily_log(tasks_by_hour: dict) -> None:
+    """Tao file log moi cho ngay hom nay, tat ca task duoc danh dau 'pending'."""
+    LOG_DIR.mkdir(exist_ok=True)
+    log_file = get_log_path()
+
+    tasks = []
+    for hour, task_list in sorted(tasks_by_hour.items()):
+        for task in task_list:
+            tasks.append({
+                "hour": task.hour,
+                "keyword": task.keyword,
+                "device_type": task.device_type,
+                "should_click": task.should_click,
+                "status": "pending",
+                "timestamp": None,
+            })
+
+    data = {"date": date.today().isoformat(), "tasks": tasks}
+
+    with open(log_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    print(f"[LOG] Da tao file log: {log_file} ({len(tasks)} tasks)")
+
+
+def load_tasks_from_log() -> dict[int, list[SearchTask]]:
+    """
+    Doc tasks tu file log cua ngay hom nay.
+    Chi tra ve cac task chua chay thanh cong (pending / failed).
+    """
+    log_file = get_log_path()
+    with open(log_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    tasks_by_hour: dict[int, list[SearchTask]] = {}
+    skipped = 0
+
+    for t in data.get("tasks", []):
+        if t["status"] == "success":
+            skipped += 1
+            continue
+        hour = t["hour"]
+        task = SearchTask(
+            keyword=t["keyword"],
+            device_type=t["device_type"],
+            should_click=t["should_click"],
+            hour=hour,
+            column_index=0,
+        )
+        tasks_by_hour.setdefault(hour, []).append(task)
+
+    total_remaining = sum(len(v) for v in tasks_by_hour.values())
+    if skipped:
+        print(f"[LOG] Bo qua {skipped} task da hoan thanh truoc do.")
+    print(f"[LOG] Con lai {total_remaining} task chua chay.")
+    return tasks_by_hour
+
+
+def update_daily_log(results: list[dict]) -> None:
+    """Cap nhat trang thai cac task trong file log sau khi chay xong."""
+    if not results:
+        return
+
+    log_file = get_log_path()
+    if not log_file.exists():
+        return
+
+    with open(log_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    result_map = {
+        (r["hour"], r["keyword"], r["device_type"]): r
+        for r in results
+    }
+
+    for task in data.get("tasks", []):
+        key = (task["hour"], task["keyword"], task["device_type"])
+        if key in result_map:
+            r = result_map[key]
+            task["status"] = r["status"]
+            task["timestamp"] = r["timestamp"]
+
+    with open(log_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    success = sum(1 for r in results if r["status"] == "success")
+    failed = len(results) - success
+    print(f"[LOG] Cap nhat log: {log_file} (OK: {success}, FAIL: {failed})")
+
+
+def get_last_completion_time() -> datetime | None:
+    """Doc log, tra ve thoi diem hoan thanh task gan nhat (timestamp moi nhat trong cac task success)."""
+    log_file = get_log_path()
+    if not log_file.exists():
+        return None
+
+    with open(log_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    timestamps = [
+        datetime.fromisoformat(t["timestamp"])
+        for t in data.get("tasks", [])
+        if t.get("status") == "success" and t.get("timestamp")
+    ]
+    return max(timestamps) if timestamps else None
+
+
+def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
+    """Chay cac task cho mot nhom (khung gio cu the)."""
+    if hour not in tasks_by_hour:
+        print(f"[INFO] Khong co task nao cho nhom {hour}:00")
+        return
+
+    tasks = tasks_by_hour[hour]
+    print(f"\n{'='*60}")
+    print(f"  NHOM {hour}:00 - {len(tasks)} task(s)")
+    print(f"{'='*60}")
+
+    for t in tasks:
+        click_str = "CLICK" if t.should_click else "NO CLICK"
+        print(f"  - [{t.device_type}] [{click_str}] {t.keyword}")
+
+    ensure_edge_running(config)
+
+    results = asyncio.run(execute_tasks(
+        cdp_url=config["cdp_url"],
+        tasks=tasks,
+        mobile_ua=config["mobile_ua"],
+        delay_between=5.0,
+    ))
+    
+    update_daily_log(results)
+    print(f"\n[OK] Hoan thanh tat ca task cho khung gio {hour}:00")
+
+
+def run_scheduled(config: dict, tasks_by_hour: dict):
+    """
+    Chay tuan tu cac nhom task, moi nhom cach nhau 1 tieng tinh tu lan hoan thanh truoc.
+
+    Neu chuong trinh bi ngat va khoi dong lai, doc log de biet lan cuoi chay luc nao
+    va tinh thoi gian cho den luot tiep theo.
+    """
+    groups = sorted(tasks_by_hour.keys())  # danh sach hour con pending, theo thu tu
+    total_tasks = sum(len(tasks_by_hour[h]) for h in groups)
+    print(f"[INFO] {len(groups)} nhom can chay, {total_tasks} task con lai.")
+
+    for i, hour in enumerate(groups):
+        # Kiem tra thoi diem co the chay nhom nay
+        last_done = get_last_completion_time()
+
+        if last_done is not None:
+            next_run_at = last_done + timedelta(hours=1)
+            now = datetime.now()
+            wait_secs = (next_run_at - now).total_seconds()
+
+            if wait_secs > 0:
+                wait_mins = int(wait_secs // 60)
+                wait_secs_rem = int(wait_secs % 60)
+                remaining_groups = groups[i:]
+                print(f"\n[INFO] Lan cuoi hoan thanh luc {last_done.strftime('%H:%M:%S')}.")
+                print(f"[INFO] Cho {wait_mins} phut {wait_secs_rem} giay den {next_run_at.strftime('%H:%M:%S')}...")
+                print(f"[INFO] Cac nhom con lai: {len(remaining_groups)} nhom")
+                time.sleep(wait_secs)
+
+        run_hour_tasks(config, tasks_by_hour, hour)
+
+    print(f"\n{'='*60}")
+    print("  DA HOAN THANH TAT CA TASK TRONG NGAY!")
+    print(f"{'='*60}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Yahoo Japan Search Tool - Tu dong search tu Google Sheet"
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help="Chay tat ca cac nhom lien tuc, khong doi giua cac nhom"
+    )
+    parser.add_argument(
+        "--test-sheet", action="store_true",
+        help="Chi doc sheet va hien thi du lieu, khong search"
+    )
+    
+    args = parser.parse_args()
+    config = load_config()
+    
+    print(f"[INFO] User: {config['user_name']}")
+    print(f"[INFO] Sheet ID: {config['sheet_id'][:20]}...")
+    print(f"[INFO] CDP URL: {config['cdp_url']}")
+    print(f"[INFO] Ngay: {date.today().strftime('%d/%m/%Y')}")
+
+    # Kiem tra file log ngay hom nay
+    log_file = get_log_path()
+    if log_file.exists():
+        print(f"\n[LOG] Tim thay file log hom nay: {log_file}")
+        print("[LOG] Su dung du lieu tu log, khong can doc lai sheet.")
+        tasks_by_hour = load_tasks_from_log()
+    else:
+        print("\n[INFO] Chua co file log hom nay. Doc du lieu tu Google Sheet...")
+        tasks_by_hour = get_search_tasks(
+            credentials_file=config["credentials_file"],
+            sheet_id=config["sheet_id"],
+            sheet_name=config["sheet_name"],
+            user_name=config["user_name"],
+            debug=args.test_sheet,
+        )
+        if tasks_by_hour:
+            init_daily_log(tasks_by_hour)
+
+    if not tasks_by_hour:
+        print("[INFO] Khong co task nao cho hom nay. Thoat.")
+        return
+    
+    # Hien thi tong quan
+    print(f"\n{'='*60}")
+    print(f"  TONG QUAN TASK TRONG NGAY")
+    print(f"{'='*60}")
+    for hour in sorted(tasks_by_hour.keys()):
+        tasks = tasks_by_hour[hour]
+        print(f"\n  [{hour}:00] - {len(tasks)} task(s):")
+        for t in tasks:
+            click_str = "CLICK" if t.should_click else "NO CLICK"
+            print(f"    - [{t.device_type}] [{click_str}] {t.keyword}")
+    
+    total = sum(len(t) for t in tasks_by_hour.values())
+    print(f"\n  Tong: {total} task(s) trong {len(tasks_by_hour)} khung gio")
+    print(f"{'='*60}")
+    
+    if args.test_sheet:
+        print("\n[INFO] Che do test-sheet: chi hien thi du lieu, khong search.")
+        return
+
+    if args.all:
+        # Chay tat ca nhom lien tuc, khong cho
+        for hour in sorted(tasks_by_hour.keys()):
+            run_hour_tasks(config, tasks_by_hour, hour)
+        print(f"\n{'='*60}")
+        print("  DA HOAN THANH TAT CA TASK!")
+        print(f"{'='*60}")
+    else:
+        # Che do mac dinh: chay tuan tu, moi nhom cach nhau 1 tieng
+        run_scheduled(config, tasks_by_hour)
+
+
+if __name__ == "__main__":
+    main()
