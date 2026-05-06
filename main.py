@@ -5,6 +5,8 @@ Su dung:
     python main.py              # Chay tuan tu, moi nhom cach nhau 1 tieng (tu dong tiep tuc khi restart)
     python main.py --all        # Chay tat ca cac nhom lien tuc (khong doi)
     python main.py --test-sheet # Chi hien thi du lieu tu sheet, khong search
+    python main.py --test-teams # Gui tin nhan test vao Teams va thoat
+    python main.py --test-wifi # Hien thi WiFi hien tai, doi sang WiFi con lai va thoat
 """
 
 import os
@@ -389,6 +391,10 @@ def main():
         "--test-teams", action="store_true",
         help="Gui tin nhan test vao Teams va thoat"
     )
+    parser.add_argument(
+        "--test-wifi", action="store_true",
+        help="Hien thi WiFi hien tai, doi sang WiFi con lai va thoat"
+    )
 
     args = parser.parse_args()
     config = load_config()
@@ -397,6 +403,23 @@ def main():
     print(f"[INFO] Sheet ID: {config['sheet_id'][:20]}...")
     print(f"[INFO] CDP URL: {config['cdp_url']}")
     print(f"[INFO] Ngay: {date.today().strftime('%d/%m/%Y')}")
+
+    # Che do test WiFi
+    if args.test_wifi:
+        wifi_1 = config.get("wifi_1", "")
+        wifi_2 = config.get("wifi_2", "")
+        if not wifi_1 or not wifi_2:
+            print("[ERROR] Chua dat WIFI_1_SSID / WIFI_2_SSID trong .env")
+            return
+        from wifi_manager import get_current_wifi, get_next_wifi, switch_to_wifi
+        current = get_current_wifi()
+        print(f"[WIFI] Hien tai : '{current}'")
+        target = get_next_wifi(current, wifi_1, wifi_2)
+        print(f"[WIFI] Se doi sang: '{target}'")
+        ok = switch_to_wifi(target)
+        after = get_current_wifi()
+        print(f"[WIFI] Ket qua : {'Thanh cong' if ok else 'That bai'} (hien tai: '{after}')")
+        return
 
     # Che do test Teams
     if args.test_teams:

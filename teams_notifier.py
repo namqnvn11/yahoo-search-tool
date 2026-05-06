@@ -1,37 +1,37 @@
 """
-teams_notifier.py - Tu dong gui tin nhan vao Microsoft Teams qua UI automation.
+teams_notifier.py - Tu dong gui tin nhan vao Microsoft Teams qua Playwright web.
 
-Su dung pyautogui + clipboard de nhan tin nhan voi danh nghia chinh ban than.
-Yeu cau: Microsoft Teams phai duoc cai dat tren may.
+Su dung Playwright de dieu khien Teams web (https://teams.live.com/v2/)
+trong mot tab rieng biet cua browser hien tai, cho phep nguoi dung tiep tuc
+lam viec song song ma khong bi gian doan.
+
+Yeu cau: Edge phai dang chay voi remote debugging (CDP) va da dang nhap Teams web.
 """
 
-import subprocess
-import time
+import asyncio
+import os
 from datetime import datetime
 from pathlib import Path
 
-import pyautogui
-import pyperclip
-
-try:
-    import pygetwindow as gw
-    HAS_PYGETWINDOW = True
-except ImportError:
-    HAS_PYGETWINDOW = False
-
-try:
-    from pywinauto import Desktop as _UIA_Desktop
-    HAS_PYWINAUTO = True
-except ImportError:
-    HAS_PYWINAUTO = False
+from dotenv import load_dotenv
+from playwright.async_api import async_playwright, Browser, Page
 
 LOG_DIR = Path("logs")
 TEAMS_LOG_FILE = LOG_DIR / "teams.log"
+TEAMS_URL = "https://teams.live.com/v2/"
 
-# Tat failsafe cua pyautogui (mac dinh: di chuot den goc trai se dung lai)
-# Giu nguyen True de an toan
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.3
+# ============================================================
+# Selectors - dua tren cau truc HTML cua Teams web
+# ============================================================
+
+# Cay danh sach chat ben trai
+CHAT_LIST_TREE = 'div[role="tree"]'
+
+# Moi item la 1 cuoc tro chuyen trong danh sach
+CHAT_ITEM = 'div[role="treeitem"][data-testid="list-item"]'
+
+# Span chua ten cuoc tro chuyen ben trong moi CHAT_ITEM
+CHAT_TITLE = 'span[id^="title-chat-list-item_"]'
 
 
 def _log(msg: str) -> None:
@@ -46,248 +46,219 @@ def _log(msg: str) -> None:
         pass
 
 
-def _get_teams_uia_window():
+async def _get_or_create_teams_page(browser: Browser) -> Page:
     """
-    Lay cua so Teams chinh qua pywinauto UIA.
-    Neu co nhieu cua so (popup/notification), chon cai co title dai nhat (cua so chinh).
-    Tra ve window object hoac None.
+    Tim tab Teams web da mo trong browser hien tai va tra ve no.
+    Neu chua co, tao tab moi va dieu huong den Teams web.
     """
-    if not HAS_PYWINAUTO:
-        return None
-    try:
-        d = _UIA_Desktop(backend="uia")
-        wins = d.windows(title_re=".*Teams.*")
-        if not wins:
-            return None
-        # Chon cua so co title dai nhat = cua so chinh (khong phai popup)
-        return max(wins, key=lambda w: len(w.window_text()))
-    except Exception:
-        return None
+    context = browser.contexts[0]
+
+    # Tim tab Teams dang mo
+    for page in context.pages:
+        if "teams.live.com" in page.url:
+            _log(f"[TEAMS] Dung lai tab Teams da mo: {page.url}")
+            return page
+
+    # Tao tab moi
+    _log("[TEAMS] Chua co tab Teams, dang mo tab moi...")
+    page = await context.new_page()
+    await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=30000)
+    # Cho trang khoi dong xong
+    await page.wait_for_timeout(3000)
+    return page
 
 
-def _find_teams_window() -> object | None:
-    """Tim cua so Microsoft Teams dang mo (pygetwindow)."""
-    if not HAS_PYGETWINDOW:
-        return None
-    try:
-        for title_pattern in ["Microsoft Teams", "Teams"]:
-            windows = gw.getWindowsWithTitle(title_pattern)
-            if windows:
-                return windows[0]
-    except Exception:
-        pass
-    return None
-
-
-def _open_teams(teams_exe: str = "") -> bool:
+async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
     """
-    Mo Microsoft Teams neu chua chay.
-    Tra ve True neu Teams da san sang, False neu that bai.
+    Tim va click vao cuoc tro chuyen khop voi chat_name trong danh sach ben trai.
+
+    Selector path:
+        div[role="tree"]
+            div[data-fui-tree-item-value*="RecentChats"]
+                div[role="group"]
+                    div[role="treeitem"][data-testid="list-item"]  <- moi chat 1 div
+                        span[id^="title-chat-list-item_"]          <- ten chat
+
+    Args:
+        page: Playwright Page dang hien thi Teams web
+        chat_name: Ten cuoc tro chuyen can tim (lay tu TEAMS_CHAT_NAME trong .env)
+
+    Returns:
+        True neu tim thay va click thanh cong, False neu that bai
     """
-    win = _find_teams_window()
-    if win:
-        _log("[TEAMS] Teams dang chay, bring to front...")
-        try:
-            win.activate()
-            time.sleep(1)
-        except Exception:
-            pass
-        return True
-
-    _log("[TEAMS] Dang mo Microsoft Teams...")
-
-    # Thu cac duong dan pho bien
-    candidates = [
-        teams_exe,
-        r"C:\Users\\" + __import__('os').environ.get('USERNAME', '') + r"\AppData\Local\Microsoft\Teams\Update.exe",
-        r"C:\Program Files\WindowsApps\MSTeams_25xxx\ms-teams.exe",
-    ]
-    # Dung shell de mo qua Start menu (hoat dong voi ca old & new Teams)
-    try:
-        subprocess.Popen(["explorer.exe", "msteams://"])
-        time.sleep(6)
-    except Exception:
-        pass
-
-    # Kiem tra lai
-    for _ in range(10):
-        win = _find_teams_window()
-        if win:
-            _log("[TEAMS] Teams da san sang.")
-            return True
-        time.sleep(1)
-
-    _log("[TEAMS] Khong tim thay cua so Teams sau khi mo.")
-    return False
-
-
-def _focus_teams() -> bool:
-    """
-    Focus vao cua so Teams chinh.
-    Uu tien pywinauto (xu ly duoc truong hop nhieu cua so).
-    Fallback sang pygetwindow neu can.
-    """
-    # Cach 1: pywinauto set_focus (xu ly duoc nhieu cua so)
-    uia_win = _get_teams_uia_window()
-    if uia_win:
-        try:
-            uia_win.set_focus()
-            time.sleep(0.8)
-            return True
-        except Exception as e:
-            _log(f"[TEAMS] pywinauto set_focus loi: {e}")
-
-    # Cach 2: pygetwindow activate
-    win = _find_teams_window()
-    if not win:
-        _log("[TEAMS] Khong tim thay cua so Teams.")
-        return False
-    try:
-        win.activate()
-        time.sleep(0.8)
-        return True
-    except Exception as e:
-        # "Error code from Windows: 0" = Windows bao thanh cong nhung pygetwindow
-        # raise exception nham - xu ly nhu thanh cong
-        if "Error code from Windows: 0" in str(e):
-            time.sleep(0.8)
-            return True
-        _log(f"[TEAMS] Khong the focus Teams: {e}")
-        return False
-
-
-def _type_message(text: str) -> None:
-    """
-    Nhan tin nhan vao o chat dang duoc focus.
-    Dung clipboard de ho tro Unicode (tieng Viet, tieng Nhat).
-    """
-    pyperclip.copy(text)
-    time.sleep(0.2)
-    pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.3)
-
-
-def _click_chat_in_list(chat_name: str) -> bool:
-    """
-    Tim va click truc tiep vao chat trong danh sach ben trai bang pywinauto.
-    Moi TreeItem co text dang: "Group chat TEN_CHAT Has pinned... Last message..."
-    Tra ve True neu tim thay va click thanh cong.
-    """
-    if not HAS_PYWINAUTO:
-        return False
+    _log(f"[TEAMS] Tim chat '{chat_name}' trong danh sach...")
 
     try:
-        w = _get_teams_uia_window()
-        if not w:
+        # Doi danh sach chat hien thi
+        await page.wait_for_selector(CHAT_LIST_TREE, timeout=15000)
+        await page.wait_for_timeout(500)
+
+        # Lay tat ca cac chat item
+        chat_items = page.locator(CHAT_ITEM)
+        count = await chat_items.count()
+        _log(f"[TEAMS] Danh sach co {count} cuoc tro chuyen.")
+
+        if count == 0:
+            _log("[TEAMS] Danh sach chat trong. Trang co the chua load xong.")
             return False
-        items = w.descendants(control_type="TreeItem")
-        chat_name_lower = chat_name.lower()
-        for item in items:
-            txt = item.window_text()
-            if chat_name_lower in txt.lower():
-                _log(f"[TEAMS] Tim thay trong chat list: {txt[:60]}...")
-                item.click_input()
-                time.sleep(2.0)
+
+        # Duyet qua tung item, tim cai co ten khop (case-insensitive)
+        chat_name_lower = chat_name.lower().strip()
+        for i in range(count):
+            item = chat_items.nth(i)
+            title_span = item.locator(CHAT_TITLE)
+
+            if await title_span.count() == 0:
+                continue
+
+            title_text = (await title_span.inner_text()).strip()
+            if chat_name_lower in title_text.lower():
+                _log(f"[TEAMS] Tim thay: '{title_text}' (vi tri {i + 1}/{count})")
+                await item.click()
+                await page.wait_for_timeout(1500)
                 return True
+
+        _log(
+            f"[TEAMS] Khong tim thay '{chat_name}' "
+            f"trong {count} cuoc tro chuyen hien thi."
+        )
+        return False
+
     except Exception as e:
-        _log(f"[TEAMS] pywinauto loi: {e}")
+        _log(f"[TEAMS] Loi khi tim chat: {e}")
+        return False
 
-    return False
 
-
-def _click_compose_box() -> bool:
+async def _type_and_send_message(page: Page, message: str) -> bool:
     """
-    Focus vao compose box sau khi da mo dung chat.
-    Dung phim tat Alt+Shift+C, sau do click vao panel ben phai (khong dung pywinauto
-    vi cac chat list item cung co chu 'message' de gay nham lan).
-    """
-    # Cach 1: Phim tat chinh thuc cua Teams
-    pyautogui.hotkey("alt", "shift", "c")
-    time.sleep(0.5)
+    Nhap tin nhan vao CKEditor compose box va bam nut Send.
 
-    # Cach 2: Click vao panel ben phai - lay toa do tu pywinauto (chinh xac hon pygetwindow)
-    uia_win = _get_teams_uia_window()
-    if uia_win:
+    Selectors:
+        - Compose box : [data-tid="ckeditor"]                       (data-tid - on dinh)
+        - Send button : button[data-tid="newMessageCommands-send"]  (data-tid - on dinh)
+
+    Teams web dung CKEditor 5 (contenteditable div voi class "ck ck-content ...").
+    execCommand("insertText") khong tuong thich voi CKEditor 5, nen dung
+    clipboard paste (navigator.clipboard.writeText + Ctrl+V) de dam bao
+    Unicode (tieng Viet, tieng Nhat) duoc nhan vao chinh xac.
+    """
+    try:
+        # data-tid="ckeditor" la selector duy nhat va on dinh nhat cho compose box
+        compose = page.locator('[data-tid="ckeditor"]')
+        await compose.wait_for(state="visible", timeout=10000)
+        await compose.click()
+        await page.wait_for_timeout(300)
+
+        # Xoa noi dung cu (neu co) truoc khi nhap moi
+        await page.keyboard.press("Control+a")
+        await page.wait_for_timeout(100)
+
+        # Ghi noi dung vao clipboard qua JS, sau do paste bang Ctrl+V
+        # Cach nay ho tro day du Unicode ma khong can cai dat them gi
+        await page.evaluate("(text) => navigator.clipboard.writeText(text)", message)
+        await page.keyboard.press("Control+v")
+        await page.wait_for_timeout(400)
+
+        _log(f"[TEAMS] Da nhap: {message[:40]}{'...' if len(message) > 40 else ''}")
+
+        # Fallback giua 2 data-tid cua nut Send (Teams thay doi theo phien ban/che do)
+        send_btn = page.locator(
+            'button[data-tid="newMessageCommands-send"]'
+        ).or_(
+            page.locator('button[data-tid="sendMessageCommands-send"]')
+        )
+
         try:
-            rect = uia_win.rectangle()
-            # 60% chieu rong: nam trong vung chat, tranh sidebar ben trai
-            cx = rect.left + int((rect.right - rect.left) * 0.60)
-            cy = rect.bottom - 60
-            pyautogui.click(cx, cy)
-            time.sleep(0.4)
-            _log(f"[TEAMS] Click compose box tai ({cx}, {cy})")
-            return True
-        except Exception as e:
-            _log(f"[TEAMS] Khong the lay toa do cua so: {e}")
+            await send_btn.first.wait_for(state="visible", timeout=5000)
+            await send_btn.first.click()
+            _log("[TEAMS] Da bam nut Send.")
+        except Exception:
+            # Fallback cuoi: Ctrl+Enter (Teams luon ho tro phim tat nay)
+            _log("[TEAMS] Khong tim thay nut Send, thu Ctrl+Enter...")
+            await page.keyboard.press("Control+Enter")
 
-    return False
+        await page.wait_for_timeout(500)
+        return True
+
+    except Exception as e:
+        _log(f"[TEAMS] Loi khi nhap/gui tin nhan: {e}")
+        return False
+
+
+async def _async_send_message(cdp_url: str, chat_name: str, message: str) -> bool:
+    """
+    Ket noi den browser hien tai qua CDP, mo tab Teams web (hoac dung lai tab cu),
+    tim chat theo ten va gui tin nhan.
+
+    Args:
+        cdp_url: CDP endpoint (vi du: http://localhost:9222)
+        chat_name: Ten cuoc tro chuyen
+        message: Noi dung tin nhan
+
+    Returns:
+        True neu thanh cong, False neu that bai
+    """
+    async with async_playwright() as p:
+        try:
+            # Ket noi den browser dang chay qua CDP
+            browser = await p.chromium.connect_over_cdp(cdp_url)
+            _log("[TEAMS] Da ket noi den browser qua CDP.")
+
+            # Cap quyen clipboard de co the dung navigator.clipboard.writeText + Ctrl+V
+            await browser.contexts[0].grant_permissions(
+                ["clipboard-read", "clipboard-write"]
+            )
+
+            # Tim hoac tao tab Teams
+            page = await _get_or_create_teams_page(browser)
+
+            # Neu tab khong con o trang Teams (vd: da di chuyen), navigate lai
+            if "teams.live.com" not in page.url:
+                _log("[TEAMS] Tab khong con o Teams, dang navigate lai...")
+                await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3000)
+
+            # Buoc 1: Tim va click vao chat
+            found = await _find_and_click_chat(page, chat_name)
+            if not found:
+                return False
+
+            # Buoc 2: Nhap tin nhan va bam Send
+            sent = await _type_and_send_message(page, message)
+            if not sent:
+                return False
+
+            _log(f"[TEAMS] Da gui tin nhan thanh cong vao '{chat_name}'.")
+            return True
+
+        except Exception as e:
+            _log(f"[TEAMS] Loi CDP / Playwright: {e}")
+            return False
 
 
 def send_message(chat_name: str, message: str, teams_exe: str = "") -> bool:
     """
-    Tim nhom chat va gui tin nhan.
-    Uu tien click truc tiep vao chat list (pywinauto),
-    fallback sang Ctrl+E search neu khong tim thay.
+    Tim nhom chat va gui tin nhan qua Teams web bang Playwright.
 
     Args:
-        chat_name: Ten nhom chat / kenh / nguoi
-        message: Noi dung tin nhan (ho tro Unicode)
-        teams_exe: Duong dan den Teams exe (tuy chon)
+        chat_name: Ten nhom chat / kenh / nguoi (phai khop voi ten hien thi tren Teams)
+        message: Noi dung tin nhan (ho tro Unicode: tieng Viet, tieng Nhat...)
+        teams_exe: Khong con su dung (giu lai de khong break code cu)
 
     Returns:
         True neu gui thanh cong, False neu that bai
     """
+    load_dotenv()
+    port = os.getenv("EDGE_REMOTE_DEBUGGING_PORT", "9222")
+    cdp_url = os.getenv("EDGE_CDP_URL", f"http://localhost:{port}")
+
     _log(f"[TEAMS] Chuan bi gui tin nhan vao '{chat_name}'...")
 
-    # 1. Dam bao Teams dang chay
-    if not _open_teams(teams_exe):
-        _log("[TEAMS] Khong the mo Teams. Bo qua notification.")
+    try:
+        return asyncio.run(_async_send_message(cdp_url, chat_name, message))
+    except Exception as e:
+        _log(f"[TEAMS] Loi: {e}")
         return False
-
-    # 2. Focus Teams -> tim chat trong list
-    if not _focus_teams():
-        return False
-    time.sleep(0.8)
-
-    found = _click_chat_in_list(chat_name)
-
-    # 3. Fallback: Ctrl+E search neu khong tim thay trong list
-    if not found:
-        _log(f"[TEAMS] Khong tim thay trong chat list, thu Ctrl+E search...")
-        if not _focus_teams():
-            return False
-        pyautogui.hotkey("ctrl", "e")
-        time.sleep(1.2)
-        pyautogui.hotkey("ctrl", "a")
-        pyperclip.copy(chat_name)
-        pyautogui.hotkey("ctrl", "v")
-        time.sleep(2.0)
-        pyautogui.press("down")
-        time.sleep(0.5)
-        pyautogui.press("enter")
-        time.sleep(2.5)
-
-    # 4. Focus Teams -> Escape dong popup neu co
-    if not _focus_teams():
-        return False
-    pyautogui.press("escape")
-    time.sleep(0.3)
-
-    # 5. Focus Teams -> click compose box
-    if not _focus_teams():
-        return False
-    _click_compose_box()
-
-    # 6. Focus Teams -> nhan tin nhan va gui
-    if not _focus_teams():
-        return False
-    _type_message(message)
-    time.sleep(0.3)
-    pyautogui.press("enter")
-    time.sleep(0.5)
-
-    _log(f"[TEAMS] Da gui tin nhan vao '{chat_name}'.")
-    return True
 
 
 def notify_hour_complete(

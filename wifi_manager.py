@@ -27,6 +27,32 @@ def _log(msg: str) -> None:
         pass
 
 
+def _get_wlan_interfaces() -> list[str]:
+    """
+    Lay danh sach ten cac interface WiFi hien co tren may.
+    Vi du: ['Wi-Fi', 'Wi-Fi 2', 'Wireless Network Connection']
+    """
+    interfaces = []
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            # Tim dong "Name" (khong phai "Profile Name" hay "Network Name")
+            if re.match(r"^Name\s*:", stripped, re.IGNORECASE):
+                match = re.search(r":\s*(.+)$", stripped)
+                if match:
+                    interfaces.append(match.group(1).strip())
+    except Exception:
+        pass
+    return interfaces
+
+
 def get_current_wifi() -> str | None:
     """
     Lay SSID cua WiFi dang ket noi.
@@ -51,10 +77,30 @@ def get_current_wifi() -> str | None:
     return None
 
 
+def _run_connect(target_ssid: str, interface: str) -> str:
+    """
+    Chay lenh netsh wlan connect voi interface cu the.
+    Tra ve stdout cua lenh.
+    """
+    result = subprocess.run(
+        ["netsh", "wlan", "connect", f"name={target_ssid}", f"interface={interface}"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return (result.stdout + result.stderr).strip()
+
+
 def switch_to_wifi(target_ssid: str, wait_seconds: int = 20) -> bool:
     """
     Doi sang WiFi co ten target_ssid.
     WiFi profile phai da duoc luu tren may.
+
+    Luu y: neu gap loi "not available to connect", ham tu dong:
+      1. Detect ten interface WiFi thuc te tren may (khong hard-code "Wi-Fi")
+      2. Disconnect truoc roi moi connect lai
+      3. Thu toan bo interface neu con nhieu card WiFi
 
     Args:
         target_ssid: Ten WiFi can ket noi (phai trung voi ten profile da luu)
@@ -70,51 +116,62 @@ def switch_to_wifi(target_ssid: str, wait_seconds: int = 20) -> bool:
 
     _log(f"[WIFI] Dang chuyen tu '{current}' sang '{target_ssid}'...")
 
-    try:
-        result = subprocess.run(
-            ["netsh", "wlan", "connect", f"name={target_ssid}"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
+    # Lay danh sach interface WiFi thuc te tren may nay
+    interfaces = _get_wlan_interfaces()
+    if not interfaces:
+        # Fallback: thu voi ten pho bien nhat
+        interfaces = ["Wi-Fi", "Wireless Network Connection"]
+    _log(f"[WIFI] Interface phat hien: {interfaces}")
 
-        # netsh thuong tra ve thong bao o stdout (khong dung returncode de kiem tra)
-        # "Connection request was completed successfully." -> thanh cong
-        # Cac thong bao loi khac -> that bai
-        if stdout:
-            _log(f"[WIFI] netsh: {stdout}")
-        if stderr:
-            _log(f"[WIFI] netsh stderr: {stderr}")
+    def _attempt_connect(iface: str, do_disconnect: bool) -> bool:
+        """Thu ket noi tren 1 interface, co the disconnect truoc."""
+        if do_disconnect:
+            subprocess.run(
+                ["netsh", "wlan", "disconnect", f"interface={iface}"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            time.sleep(1)
 
-        # Neu co bao loi ro rang (khong phai thong bao thanh cong), thoat som
-        stdout_lower = stdout.lower()
-        if stdout and "successfully" not in stdout_lower and (
-            "error" in stdout_lower
-            or "not found" in stdout_lower
-            or "cannot" in stdout_lower
-            or "failed" in stdout_lower
-            or "khong" in stdout_lower
-        ):
-            _log(f"[WIFI] Lenh ket noi bao loi, se tiep tuc doi ket noi...")
+        output = _run_connect(target_ssid, iface)
+        if output:
+            _log(f"[WIFI] [{iface}] netsh: {output}")
+        return "successfully" in output.lower()
 
-    except Exception as e:
-        _log(f"[WIFI] Loi khi chay lenh netsh: {e}")
-        return False
+    # Lan 1: connect thang (khong disconnect) tren tung interface
+    for iface in interfaces:
+        _attempt_connect(iface, do_disconnect=False)
 
-    # Doi ket noi duoc thiet lap (bat ke returncode, chi tin vao ket qua thuc te)
-    for i in range(wait_seconds):
+    # Kiem tra sau lan 1
+    for i in range(min(10, wait_seconds)):
         time.sleep(1)
         current = get_current_wifi()
         if current == target_ssid:
             _log(f"[WIFI] Ket noi thanh cong sau {i + 1}s: {target_ssid}")
             return True
-        if (i + 1) % 5 == 0:
-            _log(f"[WIFI] Dang cho ket noi... ({i + 1}s/{wait_seconds}s), hien tai: '{current}'")
 
-    _log(f"[WIFI] Timeout: khong the ket noi vao '{target_ssid}' sau {wait_seconds}s (hien tai: '{get_current_wifi()}')")
+    # Lan 2: disconnect truoc roi connect lai (xu ly loi "not available")
+    _log(f"[WIFI] Chua ket noi duoc, thu disconnect truoc roi connect lai...")
+    for iface in interfaces:
+        _attempt_connect(iface, do_disconnect=True)
+
+    # Doi ket noi duoc thiet lap
+    remaining = wait_seconds - 10
+    for i in range(max(remaining, 10)):
+        time.sleep(1)
+        current = get_current_wifi()
+        if current == target_ssid:
+            _log(f"[WIFI] Ket noi thanh cong sau lan 2 ({i + 1}s): {target_ssid}")
+            return True
+        if (i + 1) % 5 == 0:
+            _log(f"[WIFI] Dang cho... ({i + 1}s), hien tai: '{current}'")
+
+    _log(
+        f"[WIFI] Timeout: khong the ket noi vao '{target_ssid}' "
+        f"sau {wait_seconds}s (hien tai: '{get_current_wifi()}')"
+    )
     return False
 
 
