@@ -14,6 +14,8 @@ from datetime import datetime
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+from wifi_manager import get_current_wifi
+
 
 YAHOO_URL = "https://www.yahoo.co.jp/"
 
@@ -277,6 +279,7 @@ async def execute_tasks(
     tasks: list,
     mobile_ua: str,
     delay_between: float = 5.0,
+    session_wifi: str | None = None,
 ) -> list[dict]:
     """
     Thuc hien danh sach cac task search.
@@ -286,6 +289,7 @@ async def execute_tasks(
         tasks: Danh sach SearchTask
         mobile_ua: Mobile user agent
         delay_between: Thoi gian cho giua cac task (giay)
+        session_wifi: SSID WiFi da chon cho toan bo nhom task nay (None = khong quan ly)
 
     Returns:
         Danh sach ket qua, moi phan tu chua thong tin task va trang thai.
@@ -294,12 +298,16 @@ async def execute_tasks(
         print("[INFO] Khong co task nao de thuc hien.")
         return []
 
+    # Neu khong truyen session_wifi, ghi nhan WiFi hien tai de logging
+    wifi_ssid = session_wifi if session_wifi else get_current_wifi()
+
     browser = await connect_to_browser(cdp_url)
     results = []
 
     try:
         for i, task in enumerate(tasks):
             print(f"\n--- Task {i + 1}/{len(tasks)} ---")
+
             success = await perform_search(
                 browser=browser,
                 keyword=task.keyword,
@@ -326,6 +334,7 @@ async def execute_tasks(
                 "device_type": task.device_type,
                 "should_click": task.should_click,
                 "status": "success" if success else "failed",
+                "wifi_ssid": wifi_ssid,
             })
 
             # Doi giua cac task

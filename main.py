@@ -42,6 +42,8 @@ def load_config() -> dict:
         "edge_user_data_dir": os.getenv("EDGE_USER_DATA_DIR", ""),
         "edge_profile_directory": os.getenv("EDGE_PROFILE_DIRECTORY", "Default"),
         "edge_port": port,
+        "wifi_1": os.getenv("WIFI_1_SSID", "").strip(),
+        "wifi_2": os.getenv("WIFI_2_SSID", "").strip(),
     }
 
     # Kiem tra cau hinh bat buoc
@@ -76,18 +78,35 @@ def is_cdp_port_open(cdp_url: str) -> bool:
         return False
 
 
+def kill_edge() -> None:
+    """
+    Tat tat ca tien trinh Edge dang chay ngam.
+    Goi truoc khi mo Edge moi de tranh xung dot cong CDP.
+    """
+    try:
+        result = subprocess.run(
+            ["taskkill", "/F", "/IM", "msedge.exe"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print("[BROWSER] Da tat cac tien trinh Edge cu.")
+            time.sleep(1)
+        # returncode 128 = khong tim thay process (Edge chua chay) -> bo qua
+    except Exception as e:
+        print(f"[BROWSER] Khong the tat Edge: {e}")
+
+
 def ensure_edge_running(config: dict) -> None:
     """
-    Kiem tra Edge da chay voi cong CDP chua.
-    Neu chua, tu dong mo Edge voi profile da cau hinh trong .env.
+    Kill Edge cu, sau do mo Edge moi voi cong CDP da cau hinh.
+    Luon kill truoc de dam bao khong co tien trinh ngam nao can duong.
     """
     cdp_url = config["cdp_url"]
 
-    if is_cdp_port_open(cdp_url):
-        print(f"[BROWSER] Edge da san sang tai {cdp_url}")
-        return
+    kill_edge()
 
-    print(f"[BROWSER] Chua tim thay Edge tren {cdp_url}. Dang mo...")
+    print(f"[BROWSER] Dang mo Edge moi tren {cdp_url}...")
 
     edge_exe = config["edge_executable"]
     if not edge_exe or not os.path.exists(edge_exe):
@@ -143,6 +162,7 @@ def init_daily_log(tasks_by_hour: dict) -> None:
                 "should_click": task.should_click,
                 "status": "pending",
                 "timestamp": None,
+                "wifi_ssid": None,
             })
 
     data = {"date": date.today().isoformat(), "tasks": tasks}
@@ -209,6 +229,7 @@ def update_daily_log(results: list[dict]) -> None:
             r = result_map[key]
             task["status"] = r["status"]
             task["timestamp"] = r["timestamp"]
+            task["wifi_ssid"] = r.get("wifi_ssid")
 
     with open(log_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -216,6 +237,30 @@ def update_daily_log(results: list[dict]) -> None:
     success = sum(1 for r in results if r["status"] == "success")
     failed = len(results) - success
     print(f"[LOG] Cap nhat log: {log_file} (OK: {success}, FAIL: {failed})")
+
+
+def load_last_run_wifi_from_log() -> str | None:
+    """
+    Doc WiFi da dung cho nhom task gan nhat (co timestamp moi nhat) tu file log hom nay.
+    Tra ve SSID hoac None neu chua co lich su.
+    """
+    log_file = get_log_path()
+    if not log_file.exists():
+        return None
+
+    with open(log_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    last_wifi = None
+    last_ts = None
+    for t in data.get("tasks", []):
+        if t.get("status") == "success" and t.get("wifi_ssid") and t.get("timestamp"):
+            ts = datetime.fromisoformat(t["timestamp"])
+            if last_ts is None or ts > last_ts:
+                last_ts = ts
+                last_wifi = t["wifi_ssid"]
+
+    return last_wifi
 
 
 def get_last_completion_time() -> datetime | None:
@@ -250,6 +295,21 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
         click_str = "CLICK" if t.should_click else "NO CLICK"
         print(f"  - [{t.device_type}] [{click_str}] {t.keyword}")
 
+    # Kiem tra va doi WiFi truoc khi chay ca nhom
+    wifi_1 = config.get("wifi_1", "")
+    wifi_2 = config.get("wifi_2", "")
+    if wifi_1 and wifi_2:
+        print(f"\n[WIFI] Che do doi WiFi: '{wifi_1}' <-> '{wifi_2}'")
+        last_run_wifi = load_last_run_wifi_from_log()
+        if last_run_wifi:
+            print(f"[WIFI] Nhom truoc da dung: '{last_run_wifi}'")
+        from wifi_manager import ensure_different_from_last
+        session_wifi = ensure_different_from_last(last_run_wifi, wifi_1, wifi_2)
+        print(f"[WIFI] Nhom nay se dung: '{session_wifi}'")
+    else:
+        print("\n[WIFI] Khong cau hinh WiFi rotation (WIFI_1_SSID/WIFI_2_SSID trong .env)")
+        session_wifi = None
+
     ensure_edge_running(config)
 
     results = asyncio.run(execute_tasks(
@@ -257,8 +317,9 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
         tasks=tasks,
         mobile_ua=config["mobile_ua"],
         delay_between=5.0,
+        session_wifi=session_wifi,
     ))
-    
+
     update_daily_log(results)
     print(f"\n[OK] Hoan thanh tat ca task cho khung gio {hour}:00")
 
