@@ -27,11 +27,14 @@ TEAMS_URL = "https://teams.live.com/v2/"
 # Cay danh sach chat ben trai
 CHAT_LIST_TREE = 'div[role="tree"]'
 
-# Moi item la 1 cuoc tro chuyen trong danh sach
-CHAT_ITEM = 'div[role="treeitem"][data-testid="list-item"]'
-
-# Span chua ten cuoc tro chuyen ben trong moi CHAT_ITEM
-CHAT_TITLE = 'span[id^="title-chat-list-item_"]'
+# Span chua ten cuoc tro chuyen
+# - May 1: span[id^="title-chat-list-item_"]  (khong co data-tid)
+# - May 2: span[data-tid="chat-list-item-title"] (co them data-tid)
+# => dung OR selector, id-prefix la chung nhat
+CHAT_TITLE_SPAN = (
+    'span[id^="title-chat-list-item_"], '
+    'span[data-tid="chat-list-item-title"]'
+)
 
 
 def _log(msg: str) -> None:
@@ -72,12 +75,10 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
     """
     Tim va click vao cuoc tro chuyen khop voi chat_name trong danh sach ben trai.
 
-    Selector path:
-        div[role="tree"]
-            div[data-fui-tree-item-value*="RecentChats"]
-                div[role="group"]
-                    div[role="treeitem"][data-testid="list-item"]  <- moi chat 1 div
-                        span[id^="title-chat-list-item_"]          <- ten chat
+    Chien luoc chong nhau-phien-ban:
+      - Tim tat ca span ten chat bang OR selector (tuong thich ca 2 phien ban HTML)
+      - Khi tim thay span khop, traverse len ancestor div[role="treeitem"] de click
+      - Khong phu thuoc vao cac attribute phu (data-testid, data-fui-tree-item-value...)
 
     Args:
         page: Playwright Page dang hien thi Teams web
@@ -93,34 +94,34 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
         await page.wait_for_selector(CHAT_LIST_TREE, timeout=15000)
         await page.wait_for_timeout(500)
 
-        # Lay tat ca cac chat item
-        chat_items = page.locator(CHAT_ITEM)
-        count = await chat_items.count()
-        _log(f"[TEAMS] Danh sach co {count} cuoc tro chuyen.")
+        # Tim tat ca span chua ten chat (OR selector - tuong thich ca 2 phien ban)
+        title_spans = page.locator(CHAT_TITLE_SPAN)
+        count = await title_spans.count()
+        _log(f"[TEAMS] Tim thay {count} span ten chat trong danh sach.")
 
         if count == 0:
-            _log("[TEAMS] Danh sach chat trong. Trang co the chua load xong.")
+            _log("[TEAMS] Khong co span ten chat. Trang co the chua load xong.")
             return False
 
-        # Duyet qua tung item, tim cai co ten khop (case-insensitive)
+        # Duyet qua tung span, tim cai khop ten (case-insensitive)
         chat_name_lower = chat_name.lower().strip()
         for i in range(count):
-            item = chat_items.nth(i)
-            title_span = item.locator(CHAT_TITLE)
+            span = title_spans.nth(i)
+            title_text = (await span.inner_text()).strip()
 
-            if await title_span.count() == 0:
-                continue
-
-            title_text = (await title_span.inner_text()).strip()
             if chat_name_lower in title_text.lower():
                 _log(f"[TEAMS] Tim thay: '{title_text}' (vi tri {i + 1}/{count})")
-                await item.click()
+
+                # Traverse len ancestor div[role="treeitem"] gan nhat de click
+                # Cach nay hoat dong bat ke phien ban HTML (co hay khong co data-testid)
+                treeitem = span.locator('xpath=ancestor::div[@role="treeitem"]').first
+                await treeitem.click()
                 await page.wait_for_timeout(1500)
                 return True
 
         _log(
             f"[TEAMS] Khong tim thay '{chat_name}' "
-            f"trong {count} cuoc tro chuyen hien thi."
+            f"trong {count} span ten chat hien thi."
         )
         return False
 
