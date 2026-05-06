@@ -1,8 +1,13 @@
 """
-wifi_manager.py - Quan ly WiFi: lay SSID hien tai va doi WiFi.
+wifi_manager.py - Quan ly mang: WiFi rotation va ethernet on/off.
 
-Su dung netsh (co san tren Windows) de ket noi den WiFi profile da luu.
-Yeu cau: ca 2 WiFi phai da duoc luu profile tren may (da tung ket noi truoc).
+Che do hoat dong (NETWORK_MODE trong .env):
+  wifi           - Chi doi WiFi, ethernet khong bi anh huong (mac dinh)
+  ethernet-wifi  - Tat ethernet truoc khi search (de buoc dung WiFi),
+                   bat lai ethernet sau khi search xong
+
+Su dung netsh (co san tren Windows).
+Yeu cau WiFi: ca 2 SSID phai da duoc luu profile tren may.
 """
 
 import re
@@ -219,3 +224,114 @@ def ensure_different_from_last(
         _log(f"[WIFI] Nhom truoc dung '{last_run_wifi}', hien tai la '{current}' -> khong can doi")
 
     return current
+
+
+# ============================================================
+# Ethernet management (dung cho NETWORK_MODE=ethernet-wifi)
+# ============================================================
+
+def get_ethernet_interfaces() -> list[str]:
+    """
+    Tu dong phat hien cac adapter ethernet (khong phai WiFi/virtual) tren may.
+    Su dung: netsh interface show interface
+
+    Returns:
+        Danh sach ten adapter, vd: ['Ethernet', 'Ethernet 2']
+    """
+    try:
+        result = subprocess.run(
+            ["netsh", "interface", "show", "interface"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        ifaces = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            # Chi xu ly cac dong co trang thai Enabled hoac Disabled
+            if not stripped.startswith(("Enabled", "Disabled")):
+                continue
+            # Format: "Enabled   Connected   Dedicated   Interface Name"
+            # Dung split 2+ khoang trang de giu nguyen ten co space
+            parts = re.split(r"\s{2,}", stripped)
+            if len(parts) < 4:
+                continue
+            iface_name = parts[3].strip()
+            # Loai tru WiFi, bluetooth va adapter ao
+            skip_keywords = [
+                "wi-fi", "wifi", "wireless", "wlan",
+                "bluetooth", "loopback", "vethernet",
+                "vmware", "virtualbox", "teredo", "isatap",
+            ]
+            if any(kw in iface_name.lower() for kw in skip_keywords):
+                continue
+            ifaces.append(iface_name)
+        return ifaces
+    except Exception as e:
+        _log(f"[ETHERNET] Loi khi lay danh sach interface: {e}")
+        return []
+
+
+def _set_ethernet_admin(adapters: list[str], enable: bool) -> None:
+    """Bat (enable=True) hoac tat (enable=False) cac adapter cho truoc."""
+    action = "enable" if enable else "disable"
+    for adapter in adapters:
+        try:
+            result = subprocess.run(
+                ["netsh", "interface", "set", "interface", adapter, f"admin={action}"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            output = (result.stdout + result.stderr).strip()
+            label = "Bat" if enable else "Tat"
+            if output:
+                _log(f"[ETHERNET] {label} '{adapter}': {output}")
+            else:
+                _log(f"[ETHERNET] {label} '{adapter}': OK")
+        except Exception as e:
+            _log(f"[ETHERNET] Loi khi {'bat' if enable else 'tat'} '{adapter}': {e}")
+
+
+def disable_ethernet(ethernet_adapter: str = "") -> list[str]:
+    """
+    Tat ethernet truoc khi chay search (buoc traffic qua WiFi).
+
+    Args:
+        ethernet_adapter: Ten adapter cu the (lay tu ETHERNET_ADAPTER trong .env).
+                          De trong de tu dong phat hien.
+
+    Returns:
+        Danh sach adapter da tat (dung de bat lai sau nay).
+    """
+    if ethernet_adapter:
+        adapters = [ethernet_adapter]
+    else:
+        adapters = get_ethernet_interfaces()
+
+    if not adapters:
+        _log("[ETHERNET] Khong tim thay ethernet adapter nao de tat.")
+        return []
+
+    _log(f"[ETHERNET] Dang tat ethernet: {adapters}")
+    _set_ethernet_admin(adapters, enable=False)
+    time.sleep(1)
+    return adapters
+
+
+def enable_ethernet(adapters: list[str]) -> None:
+    """
+    Bat lai cac ethernet adapter sau khi search xong.
+    Ham nay LUON duoc goi trong khoi finally de dam bao ethernet khong bi tat mai mai.
+
+    Args:
+        adapters: Danh sach ten adapter can bat lai (tra ve tu disable_ethernet).
+    """
+    if not adapters:
+        return
+    _log(f"[ETHERNET] Dang bat lai ethernet: {adapters}")
+    _set_ethernet_admin(adapters, enable=True)
+    time.sleep(2)
+    _log("[ETHERNET] Ethernet da duoc bat lai.")

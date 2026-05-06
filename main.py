@@ -47,6 +47,8 @@ def load_config() -> dict:
         "edge_port": port,
         "wifi_1": os.getenv("WIFI_1_SSID", "").strip(),
         "wifi_2": os.getenv("WIFI_2_SSID", "").strip(),
+        "network_mode": os.getenv("NETWORK_MODE", "wifi").strip().lower(),
+        "ethernet_adapter": os.getenv("ETHERNET_ADAPTER", "").strip(),
         "teams_chat_name": os.getenv("TEAMS_CHAT_NAME", "").strip(),
         "teams_exe": os.getenv("TEAMS_EXE_PATH", "").strip(),
     }
@@ -244,10 +246,13 @@ def update_daily_log(results: list[dict]) -> None:
     print(f"[LOG] Cap nhat log: {log_file} (OK: {success}, FAIL: {failed})")
 
 
+_ETHERNET_MARKER = "ethernet"
+
+
 def load_last_run_wifi_from_log() -> str | None:
     """
-    Doc WiFi da dung cho nhom task gan nhat (co timestamp moi nhat) tu file log hom nay.
-    Tra ve SSID hoac None neu chua co lich su.
+    Doc mang da dung cho nhom task gan nhat tu file log hom nay.
+    Tra ve SSID WiFi, '_ETHERNET_MARKER', hoac None neu chua co lich su.
     """
     log_file = get_log_path()
     if not log_file.exists():
@@ -264,6 +269,34 @@ def load_last_run_wifi_from_log() -> str | None:
             if last_ts is None or ts > last_ts:
                 last_ts = ts
                 last_wifi = t["wifi_ssid"]
+
+    return last_wifi
+
+
+def load_last_wifi_ssid_from_log() -> str | None:
+    """
+    Doc WiFi SSID thuc su da dung lan cuoi (bo qua cac lan dung ethernet).
+    Dung de xoay vong WiFi trong che do ethernet-wifi.
+    """
+    log_file = get_log_path()
+    if not log_file.exists():
+        return None
+
+    with open(log_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    last_wifi = None
+    last_ts = None
+    for t in data.get("tasks", []):
+        ssid = t.get("wifi_ssid", "")
+        if (t.get("status") == "success"
+                and ssid
+                and ssid != _ETHERNET_MARKER
+                and t.get("timestamp")):
+            ts = datetime.fromisoformat(t["timestamp"])
+            if last_ts is None or ts > last_ts:
+                last_ts = ts
+                last_wifi = ssid
 
     return last_wifi
 
@@ -300,30 +333,79 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
         click_str = "CLICK" if t.should_click else "NO CLICK"
         print(f"  - [{t.device_type}] [{click_str}] {t.keyword}")
 
-    # Kiem tra va doi WiFi truoc khi chay ca nhom
     wifi_1 = config.get("wifi_1", "")
     wifi_2 = config.get("wifi_2", "")
-    if wifi_1 and wifi_2:
+    network_mode = config.get("network_mode", "wifi")
+    ethernet_adapter = config.get("ethernet_adapter", "")
+
+    last_network = load_last_run_wifi_from_log()
+    disabled_adapters: list[str] = []
+    session_wifi: str | None = None
+
+    if network_mode == "ethernet-wifi" and wifi_1 and wifi_2:
+        # Xoay vong: ethernet -> wifi -> ethernet -> wifi ...
+        # last_network la "ethernet", WiFi SSID, hoac None (lan dau)
+        print(f"\n[NETWORK] Che do ethernet-wifi | WiFi: '{wifi_1}' / '{wifi_2}'")
+        if last_network:
+            print(f"[NETWORK] Nhom truoc da dung: '{last_network}'")
+
+        if last_network == _ETHERNET_MARKER:
+            # Lan truoc dung ethernet -> lan nay dung WiFi
+            last_wifi_ssid = load_last_wifi_ssid_from_log()
+            from wifi_manager import get_next_wifi, switch_to_wifi
+            target_wifi = get_next_wifi(last_wifi_ssid, wifi_1, wifi_2)
+            print(f"[NETWORK] Nhom nay: WiFi ('{target_wifi}')")
+
+            ensure_edge_running(config)
+
+            from wifi_manager import disable_ethernet
+            disabled_adapters = disable_ethernet(ethernet_adapter)
+            if disabled_adapters:
+                print(f"[NETWORK] Da tat ethernet: {disabled_adapters}")
+            else:
+                print("[NETWORK] Canh bao: khong tim thay ethernet adapter nao de tat.")
+
+            switched = switch_to_wifi(target_wifi)
+            if switched:
+                session_wifi = target_wifi
+            else:
+                from wifi_manager import get_current_wifi
+                session_wifi = get_current_wifi() or target_wifi
+                print(f"[NETWORK] Canh bao: khong doi duoc WiFi, dang dung: '{session_wifi}'")
+        else:
+            # Lan truoc dung WiFi (hoac lan dau) -> lan nay dung Ethernet
+            print(f"[NETWORK] Nhom nay: Ethernet")
+            session_wifi = _ETHERNET_MARKER
+            ensure_edge_running(config)
+
+    elif wifi_1 and wifi_2:
+        # wifi mode: chi xoay vong WiFi, ethernet khong bi anh huong
         print(f"\n[WIFI] Che do doi WiFi: '{wifi_1}' <-> '{wifi_2}'")
-        last_run_wifi = load_last_run_wifi_from_log()
-        if last_run_wifi:
-            print(f"[WIFI] Nhom truoc da dung: '{last_run_wifi}'")
+        if last_network:
+            print(f"[WIFI] Nhom truoc da dung: '{last_network}'")
         from wifi_manager import ensure_different_from_last
-        session_wifi = ensure_different_from_last(last_run_wifi, wifi_1, wifi_2)
+        session_wifi = ensure_different_from_last(last_network, wifi_1, wifi_2)
         print(f"[WIFI] Nhom nay se dung: '{session_wifi}'")
+        ensure_edge_running(config)
+
     else:
         print("\n[WIFI] Khong cau hinh WiFi rotation (WIFI_1_SSID/WIFI_2_SSID trong .env)")
-        session_wifi = None
+        ensure_edge_running(config)
 
-    ensure_edge_running(config)
-
-    results = asyncio.run(execute_tasks(
-        cdp_url=config["cdp_url"],
-        tasks=tasks,
-        mobile_ua=config["mobile_ua"],
-        delay_between=5.0,
-        session_wifi=session_wifi,
-    ))
+    try:
+        results = asyncio.run(execute_tasks(
+            cdp_url=config["cdp_url"],
+            tasks=tasks,
+            mobile_ua=config["mobile_ua"],
+            delay_between=5.0,
+            session_wifi=session_wifi,
+        ))
+    finally:
+        # Luon bat lai ethernet sau khi dung WiFi de search
+        if disabled_adapters:
+            from wifi_manager import enable_ethernet
+            print(f"\n[NETWORK] Bat lai ethernet: {disabled_adapters}")
+            enable_ethernet(disabled_adapters)
 
     update_daily_log(results)
     print(f"\n[OK] Hoan thanh tat ca task cho khung gio {hour}:00")
