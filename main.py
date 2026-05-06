@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from sheet_reader import get_search_tasks, SearchTask
 from searcher import execute_tasks
+from teams_notifier import notify_hour_complete
 
 LOG_DIR = Path("logs")
 
@@ -44,6 +45,8 @@ def load_config() -> dict:
         "edge_port": port,
         "wifi_1": os.getenv("WIFI_1_SSID", "").strip(),
         "wifi_2": os.getenv("WIFI_2_SSID", "").strip(),
+        "teams_chat_name": os.getenv("TEAMS_CHAT_NAME", "").strip(),
+        "teams_exe": os.getenv("TEAMS_EXE_PATH", "").strip(),
     }
 
     # Kiem tra cau hinh bat buoc
@@ -323,6 +326,16 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
     update_daily_log(results)
     print(f"\n[OK] Hoan thanh tat ca task cho khung gio {hour}:00")
 
+    # Gui thong bao Teams (neu da cau hinh)
+    teams_chat = config.get("teams_chat_name", "")
+    if teams_chat:
+        notify_hour_complete(
+            hour=hour,
+            results=results,
+            chat_name=teams_chat,
+            teams_exe=config.get("teams_exe", ""),
+        )
+
 
 def run_scheduled(config: dict, tasks_by_hour: dict):
     """
@@ -372,14 +385,34 @@ def main():
         "--test-sheet", action="store_true",
         help="Chi doc sheet va hien thi du lieu, khong search"
     )
-    
+    parser.add_argument(
+        "--test-teams", action="store_true",
+        help="Gui tin nhan test vao Teams va thoat"
+    )
+
     args = parser.parse_args()
     config = load_config()
-    
+
     print(f"[INFO] User: {config['user_name']}")
     print(f"[INFO] Sheet ID: {config['sheet_id'][:20]}...")
     print(f"[INFO] CDP URL: {config['cdp_url']}")
     print(f"[INFO] Ngay: {date.today().strftime('%d/%m/%Y')}")
+
+    # Che do test Teams
+    if args.test_teams:
+        teams_chat = config.get("teams_chat_name", "")
+        if not teams_chat:
+            print("[ERROR] Chua dat TEAMS_CHAT_NAME trong .env")
+            return
+        print(f"[INFO] Dang gui tin nhan test vao Teams: '{teams_chat}'")
+        from teams_notifier import send_message
+        ok = send_message(
+            chat_name=teams_chat,
+            message="[TEST] Yahoo Search Tool - Teams notification hoat dong!",
+            teams_exe=config.get("teams_exe", ""),
+        )
+        print(f"[INFO] Ket qua: {'Thanh cong' if ok else 'That bai'}")
+        return
 
     # Kiem tra file log ngay hom nay
     log_file = get_log_path()
