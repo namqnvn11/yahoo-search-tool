@@ -2,11 +2,12 @@
 main.py - Chuong trinh chinh: doc sheet, lap lich va thuc hien search Yahoo Japan.
 
 Su dung:
-    python main.py              # Chay tuan tu, moi nhom cach nhau 1 tieng (tu dong tiep tuc khi restart)
-    python main.py --all        # Chay tat ca cac nhom lien tuc (khong doi)
-    python main.py --test-sheet # Chi hien thi du lieu tu sheet, khong search
-    python main.py --test-teams # Gui tin nhan test vao Teams va thoat
-    python main.py --test-wifi # Hien thi WiFi hien tai, doi sang WiFi con lai va thoat
+    python main.py               # Chay tuan tu, moi nhom cach nhau 1 tieng (tu dong tiep tuc khi restart)
+    python main.py --all         # Chay tat ca cac nhom lien tuc (khong doi)
+    python main.py --test-sheet  # Chi hien thi du lieu tu sheet, khong search
+    python main.py --test-teams  # Gui tin nhan test vao Teams va thoat
+    python main.py --test-wifi   # Hien thi WiFi hien tai, doi sang WiFi con lai va thoat
+    python main.py --test-network # Test day du: phat hien ethernet, tat/bat + doi WiFi (ethernet-wifi mode)
 """
 
 import os
@@ -477,6 +478,10 @@ def main():
         "--test-wifi", action="store_true",
         help="Hien thi WiFi hien tai, doi sang WiFi con lai va thoat"
     )
+    parser.add_argument(
+        "--test-network", action="store_true",
+        help="Test ethernet-wifi mode: phat hien adapter, tat ethernet, doi WiFi, bat lai ethernet"
+    )
 
     args = parser.parse_args()
     config = load_config()
@@ -501,6 +506,66 @@ def main():
         ok = switch_to_wifi(target)
         after = get_current_wifi()
         print(f"[WIFI] Ket qua : {'Thanh cong' if ok else 'That bai'} (hien tai: '{after}')")
+        return
+
+    # Che do test ethernet-wifi
+    if args.test_network:
+        wifi_1 = config.get("wifi_1", "")
+        wifi_2 = config.get("wifi_2", "")
+        ethernet_adapter = config.get("ethernet_adapter", "")
+        network_mode = config.get("network_mode", "wifi")
+
+        print(f"\n[TEST-NETWORK] NETWORK_MODE = '{network_mode}'")
+        print(f"[TEST-NETWORK] WIFI_1_SSID  = '{wifi_1}'")
+        print(f"[TEST-NETWORK] WIFI_2_SSID  = '{wifi_2}'")
+        print(f"[TEST-NETWORK] ETHERNET_ADAPTER = '{ethernet_adapter or '(tu dong phat hien)'}'")
+
+        from wifi_manager import (
+            get_current_wifi,
+            get_ethernet_interfaces,
+            disable_ethernet,
+            enable_ethernet,
+            switch_to_wifi,
+            get_next_wifi,
+        )
+
+        # Buoc 1: Hien thi WiFi hien tai
+        current_wifi = get_current_wifi()
+        print(f"\n[TEST-NETWORK] WiFi hien tai: '{current_wifi}'")
+
+        # Buoc 2: Phat hien adapter ethernet
+        if ethernet_adapter:
+            detected = [ethernet_adapter]
+            print(f"[TEST-NETWORK] Adapter ethernet (tu .env): {detected}")
+        else:
+            detected = get_ethernet_interfaces()
+            print(f"[TEST-NETWORK] Adapter ethernet (tu dong phat hien): {detected}")
+
+        if not detected:
+            print("[TEST-NETWORK] Canh bao: khong tim thay ethernet adapter nao!")
+            print("[TEST-NETWORK] Kiem tra lai hoac dat ETHERNET_ADAPTER trong .env")
+        else:
+            # Buoc 3: Tat ethernet
+            print(f"\n[TEST-NETWORK] Buoc 1/3: Tat ethernet {detected}...")
+            disabled = disable_ethernet(ethernet_adapter)
+            print(f"[TEST-NETWORK] Da tat: {disabled}")
+
+            # Buoc 4: Doi WiFi
+            if wifi_1 and wifi_2:
+                target_wifi = get_next_wifi(current_wifi, wifi_1, wifi_2)
+                print(f"\n[TEST-NETWORK] Buoc 2/3: Doi WiFi sang '{target_wifi}'...")
+                ok = switch_to_wifi(target_wifi)
+                after_wifi = get_current_wifi()
+                print(f"[TEST-NETWORK] Ket qua doi WiFi: {'Thanh cong' if ok else 'That bai'} (hien tai: '{after_wifi}')")
+            else:
+                print("[TEST-NETWORK] Buoc 2/3: Bo qua doi WiFi (chua dat WIFI_1/WIFI_2 trong .env)")
+
+            # Buoc 5: Bat lai ethernet
+            print(f"\n[TEST-NETWORK] Buoc 3/3: Bat lai ethernet {disabled}...")
+            enable_ethernet(disabled)
+            final_wifi = get_current_wifi()
+            print(f"[TEST-NETWORK] Hoan thanh. WiFi sau khi bat lai ethernet: '{final_wifi}'")
+
         return
 
     # Che do test Teams
