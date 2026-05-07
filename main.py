@@ -574,14 +574,15 @@ def main():
         if not teams_chat:
             print("[ERROR] Chua dat TEAMS_CHAT_NAME trong .env")
             return
-        print(f"[INFO] Dang gui tin nhan test vao Teams: '{teams_chat}'")
+        print(f"[INFO] [DRY-RUN] Click chat '{teams_chat}' va go tin nhan thu (KHONG GUI)...")
         from teams_notifier import send_message
         ok = send_message(
             chat_name=teams_chat,
-            message="[TEST] Yahoo Search Tool - Teams notification hoat dong!",
+            message="[TEST] Yahoo Search Tool - kiem tra click chat (khong gui)",
             teams_exe=config.get("teams_exe", ""),
+            dry_run=True,
         )
-        print(f"[INFO] Ket qua: {'Thanh cong' if ok else 'That bai'}")
+        print(f"[INFO] Ket qua: {'Da click va go tin nhan thanh cong - kiem tra thu cong xem dung chat chua' if ok else 'That bai'}")
         return
 
     # Kiem tra file log ngay hom nay

@@ -108,12 +108,20 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
         chat_name_lower = chat_name_exact.lower()
 
         exact_matches: list[tuple[int, str]] = []  # (index, title_text)
+        all_titles: list[str] = []
 
         for i in range(count):
             span = title_spans.nth(i)
             title_text = (await span.inner_text()).strip()
+            all_titles.append(title_text)
             if title_text.lower() == chat_name_lower:
                 exact_matches.append((i, title_text))
+
+        _log(f"[TEAMS] --- DANH SACH CHAT TIM DUOC ({count}) ---")
+        for idx, t in enumerate(all_titles):
+            marker = " <== MATCH" if t.lower() == chat_name_lower else ""
+            _log(f"[TEAMS]   [{idx + 1:02d}] '{t}'{marker}")
+        _log(f"[TEAMS] --- TIM KIEM: '{chat_name_exact}' ---")
 
         if not exact_matches:
             _log(
@@ -131,11 +139,14 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
         chosen_index, chosen_title = exact_matches[0]
         _log(f"[TEAMS] Tim thay (exact match): '{chosen_title}' (vi tri {chosen_index + 1}/{count})")
 
-        # Click vao ancestor div[role="treeitem"] chua ten da chon
+        # Click vao div[data-inp="simple-collab-chat-switch"] - phan tu co click handler
+        # thuc su de chuyen chat, nam ben trong treeitem
         span = title_spans.nth(chosen_index)
-        treeitem = span.locator('xpath=ancestor::div[@role="treeitem"]').first
-        await treeitem.click()
-        await page.wait_for_timeout(1500)
+        chat_switch = span.locator(
+            'xpath=ancestor::div[@data-inp="simple-collab-chat-switch"]'
+        ).first
+        await chat_switch.click()
+        await page.wait_for_timeout(2000)
         return True
 
     except Exception as e:
@@ -143,7 +154,7 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
         return False
 
 
-async def _type_and_send_message(page: Page, message: str) -> bool:
+async def _type_and_send_message(page: Page, message: str, dry_run: bool = False) -> bool:
     """
     Nhap tin nhan vao CKEditor compose box va bam nut Send.
 
@@ -155,6 +166,9 @@ async def _type_and_send_message(page: Page, message: str) -> bool:
     execCommand("insertText") khong tuong thich voi CKEditor 5, nen dung
     clipboard paste (navigator.clipboard.writeText + Ctrl+V) de dam bao
     Unicode (tieng Viet, tieng Nhat) duoc nhan vao chinh xac.
+
+    Args:
+        dry_run: Neu True, chi go tin nhan vao o soạn thảo, KHONG bam nut Send.
     """
     try:
         # data-tid="ckeditor" la selector duy nhat va on dinh nhat cho compose box
@@ -174,6 +188,10 @@ async def _type_and_send_message(page: Page, message: str) -> bool:
         await page.wait_for_timeout(400)
 
         _log(f"[TEAMS] Da nhap: {message[:40]}{'...' if len(message) > 40 else ''}")
+
+        if dry_run:
+            _log("[TEAMS] [DRY-RUN] Khong bam Send. Kiem tra thu cong xem da vao dung chat chua.")
+            return True
 
         # Fallback giua 2 data-tid cua nut Send (Teams thay doi theo phien ban/che do)
         send_btn = page.locator(
@@ -199,7 +217,7 @@ async def _type_and_send_message(page: Page, message: str) -> bool:
         return False
 
 
-async def _async_send_message(cdp_url: str, chat_name: str, message: str) -> bool:
+async def _async_send_message(cdp_url: str, chat_name: str, message: str, dry_run: bool = False) -> bool:
     """
     Ket noi den browser hien tai qua CDP, mo tab Teams web (hoac dung lai tab cu),
     tim chat theo ten va gui tin nhan.
@@ -208,6 +226,7 @@ async def _async_send_message(cdp_url: str, chat_name: str, message: str) -> boo
         cdp_url: CDP endpoint (vi du: http://localhost:9222)
         chat_name: Ten cuoc tro chuyen
         message: Noi dung tin nhan
+        dry_run: Neu True, chi click chat va go tin nhan, KHONG bam Send.
 
     Returns:
         True neu thanh cong, False neu that bai
@@ -237,12 +256,15 @@ async def _async_send_message(cdp_url: str, chat_name: str, message: str) -> boo
             if not found:
                 return False
 
-            # Buoc 2: Nhap tin nhan va bam Send
-            sent = await _type_and_send_message(page, message)
+            # Buoc 2: Nhap tin nhan (co the khong gui neu dry_run)
+            sent = await _type_and_send_message(page, message, dry_run=dry_run)
             if not sent:
                 return False
 
-            _log(f"[TEAMS] Da gui tin nhan thanh cong vao '{chat_name}'.")
+            if dry_run:
+                _log(f"[TEAMS] [DRY-RUN] Da click chat '{chat_name}' va go tin nhan. Khong gui.")
+            else:
+                _log(f"[TEAMS] Da gui tin nhan thanh cong vao '{chat_name}'.")
             return True
 
         except Exception as e:
@@ -250,7 +272,7 @@ async def _async_send_message(cdp_url: str, chat_name: str, message: str) -> boo
             return False
 
 
-def send_message(chat_name: str, message: str, teams_exe: str = "") -> bool:
+def send_message(chat_name: str, message: str, teams_exe: str = "", dry_run: bool = False) -> bool:
     """
     Tim nhom chat va gui tin nhan qua Teams web bang Playwright.
 
@@ -258,18 +280,22 @@ def send_message(chat_name: str, message: str, teams_exe: str = "") -> bool:
         chat_name: Ten nhom chat / kenh / nguoi (phai khop voi ten hien thi tren Teams)
         message: Noi dung tin nhan (ho tro Unicode: tieng Viet, tieng Nhat...)
         teams_exe: Khong con su dung (giu lai de khong break code cu)
+        dry_run: Neu True, chi click chat va go tin nhan, KHONG bam Send.
 
     Returns:
-        True neu gui thanh cong, False neu that bai
+        True neu thanh cong, False neu that bai
     """
     load_dotenv()
     port = os.getenv("EDGE_REMOTE_DEBUGGING_PORT", "9222")
     cdp_url = os.getenv("EDGE_CDP_URL", f"http://localhost:{port}")
 
-    _log(f"[TEAMS] Chuan bi gui tin nhan vao '{chat_name}'...")
+    if dry_run:
+        _log(f"[TEAMS] [DRY-RUN] Click chat '{chat_name}' va go tin nhan (khong gui)...")
+    else:
+        _log(f"[TEAMS] Chuan bi gui tin nhan vao '{chat_name}'...")
 
     try:
-        return asyncio.run(_async_send_message(cdp_url, chat_name, message))
+        return asyncio.run(_async_send_message(cdp_url, chat_name, message, dry_run=dry_run))
     except Exception as e:
         _log(f"[TEAMS] Loi: {e}")
         return False
