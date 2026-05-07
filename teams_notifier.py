@@ -103,27 +103,40 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
             _log("[TEAMS] Khong co span ten chat. Trang co the chua load xong.")
             return False
 
-        # Duyet qua tung span, tim cai khop ten (case-insensitive)
-        chat_name_lower = chat_name.lower().strip()
+        # Chi chap nhan exact match (khop chinh xac 100%, case-insensitive)
+        chat_name_exact = chat_name.strip()
+        chat_name_lower = chat_name_exact.lower()
+
+        exact_matches: list[tuple[int, str]] = []  # (index, title_text)
+
         for i in range(count):
             span = title_spans.nth(i)
             title_text = (await span.inner_text()).strip()
+            if title_text.lower() == chat_name_lower:
+                exact_matches.append((i, title_text))
 
-            if chat_name_lower in title_text.lower():
-                _log(f"[TEAMS] Tim thay: '{title_text}' (vi tri {i + 1}/{count})")
+        if not exact_matches:
+            _log(
+                f"[TEAMS] LOI: Khong tim thay chat co ten chinh xac la '{chat_name_exact}' "
+                f"trong {count} chat hien thi. Huy gui tin nhan."
+            )
+            return False
 
-                # Traverse len ancestor div[role="treeitem"] gan nhat de click
-                # Cach nay hoat dong bat ke phien ban HTML (co hay khong co data-testid)
-                treeitem = span.locator('xpath=ancestor::div[@role="treeitem"]').first
-                await treeitem.click()
-                await page.wait_for_timeout(1500)
-                return True
+        if len(exact_matches) > 1:
+            _log(
+                f"[TEAMS] Canh bao: co {len(exact_matches)} chat cung ten '{chat_name_exact}', "
+                f"se chon cai dau tien trong danh sach."
+            )
 
-        _log(
-            f"[TEAMS] Khong tim thay '{chat_name}' "
-            f"trong {count} span ten chat hien thi."
-        )
-        return False
+        chosen_index, chosen_title = exact_matches[0]
+        _log(f"[TEAMS] Tim thay (exact match): '{chosen_title}' (vi tri {chosen_index + 1}/{count})")
+
+        # Click vao ancestor div[role="treeitem"] chua ten da chon
+        span = title_spans.nth(chosen_index)
+        treeitem = span.locator('xpath=ancestor::div[@role="treeitem"]').first
+        await treeitem.click()
+        await page.wait_for_timeout(1500)
+        return True
 
     except Exception as e:
         _log(f"[TEAMS] Loi khi tim chat: {e}")
