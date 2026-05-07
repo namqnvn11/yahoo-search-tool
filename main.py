@@ -107,10 +107,17 @@ def kill_edge() -> None:
 
 def ensure_edge_running(config: dict) -> None:
     """
-    Kill Edge cu, sau do mo Edge moi voi cong CDP da cau hinh.
-    Luon kill truoc de dam bao khong co tien trinh ngam nao can duong.
+    Dam bao Edge san sang cho ket noi CDP.
+
+    - Neu da ket noi duoc (CDP endpoint tra ve OK) thi KHONG kill, dung lai Edge hien tai.
+    - Neu khong ket noi duoc thi moi kill Edge cu va mo Edge moi voi cong CDP da cau hinh.
     """
     cdp_url = config["cdp_url"]
+
+    # Neu Edge da dang chay va CDP endpoint dang phan hoi thi dung luon, tranh kill khong can thiet.
+    if is_cdp_port_open(cdp_url):
+        print(f"[BROWSER] Edge da san sang (CDP OK): {cdp_url}")
+        return
 
     kill_edge()
 
