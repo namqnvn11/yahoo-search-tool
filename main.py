@@ -2,7 +2,7 @@
 main.py - Chuong trinh chinh: doc sheet, lap lich va thuc hien search Yahoo Japan.
 
 Su dung:
-    python main.py               # Chay tuan tu, moi nhom cach nhau 1 tieng (tu dong tiep tuc khi restart)
+    python main.py               # Chay tuan tu, moi nhom cach nhau ngau nhien 50-70 phut (tu dong tiep tuc khi restart)
     python main.py --all         # Chay tat ca cac nhom lien tuc (khong doi)
     python main.py --test-sheet  # Chi hien thi du lieu tu sheet, khong search
     python main.py --test-teams  # Gui tin nhan test vao Teams va thoat
@@ -13,6 +13,7 @@ Su dung:
 import os
 import sys
 import json
+import random
 import time
 import asyncio
 import argparse
@@ -442,7 +443,7 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
 
 def run_scheduled(config: dict, tasks_by_hour: dict):
     """
-    Chay tuan tu cac nhom task, moi nhom cach nhau 1 tieng tinh tu lan hoan thanh truoc.
+    Chay tuan tu cac nhom task, moi nhom cach nhau ngau nhien 50-70 phut tinh tu lan hoan thanh truoc.
 
     Neu chuong trinh bi ngat va khoi dong lai, doc log de biet lan cuoi chay luc nao
     va tinh thoi gian cho den luot tiep theo.
@@ -456,7 +457,8 @@ def run_scheduled(config: dict, tasks_by_hour: dict):
         last_done = get_last_completion_time()
 
         if last_done is not None:
-            next_run_at = last_done + timedelta(hours=1)
+            gap_minutes = random.randint(50, 70)
+            next_run_at = last_done + timedelta(minutes=gap_minutes)
             now = datetime.now()
             wait_secs = (next_run_at - now).total_seconds()
 
@@ -465,6 +467,7 @@ def run_scheduled(config: dict, tasks_by_hour: dict):
                 wait_secs_rem = int(wait_secs % 60)
                 remaining_groups = groups[i:]
                 print(f"\n[INFO] Lan cuoi hoan thanh luc {last_done.strftime('%H:%M:%S')}.")
+                print(f"[INFO] Khoang cach nhom: {gap_minutes} phut (ngau nhien 50-70).")
                 print(f"[INFO] Cho {wait_mins} phut {wait_secs_rem} giay den {next_run_at.strftime('%H:%M:%S')}...")
                 print(f"[INFO] Cac nhom con lai: {len(remaining_groups)} nhom")
                 time.sleep(wait_secs)
@@ -652,7 +655,7 @@ def main():
         print("  DA HOAN THANH TAT CA TASK!")
         print(f"{'='*60}")
     else:
-        # Che do mac dinh: chay tuan tu, moi nhom cach nhau 1 tieng
+        # Che do mac dinh: chay tuan tu, moi nhom cach nhau ngau nhien 50-70 phut
         run_scheduled(config, tasks_by_hour)
 
 
