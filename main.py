@@ -393,6 +393,17 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
             print(f"[WIFI] Nhom truoc da dung: '{last_network}'")
         from wifi_manager import ensure_different_from_last
         session_wifi = ensure_different_from_last(last_network, wifi_1, wifi_2)
+
+        if session_wifi is None:
+            wait_mins = 5
+            print(f"[WIFI] WiFi khong co san. Cho {wait_mins} phut roi thu lai...")
+            time.sleep(wait_mins * 60)
+            session_wifi = ensure_different_from_last(last_network, wifi_1, wifi_2)
+
+        if session_wifi is None:
+            print(f"[WIFI] Van khong co WiFi sau {wait_mins} phut. Bo qua nhom {hour}:00.")
+            return
+
         print(f"[WIFI] Nhom nay se dung: '{session_wifi}'")
         ensure_edge_running(config)
 

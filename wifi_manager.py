@@ -196,7 +196,8 @@ def ensure_different_from_last(
     Dam bao WiFi hien tai khac voi WiFi cua lan chay truoc.
 
     Neu WiFi hien tai trung voi last_run_wifi -> doi sang WiFi kia.
-    Goi ham nay 1 lan truoc khi bat dau chay ca nhom task.
+    Neu doi that bai va WiFi mat ket noi (None) -> thu ket noi lai WiFi cu.
+    Tra ve None neu ca 2 WiFi deu khong the ket noi duoc (can cho truoc khi chay).
 
     Args:
         last_run_wifi: WiFi da dung cho nhom task truoc do (lay tu log)
@@ -204,7 +205,7 @@ def ensure_different_from_last(
         wifi_2: SSID WiFi thu hai
 
     Returns:
-        SSID cua WiFi se dung cho nhom task nay (sau khi doi neu can)
+        SSID cua WiFi se dung cho nhom task nay, hoac None neu khong co WiFi nao kha dung.
     """
     current = get_current_wifi()
 
@@ -212,18 +213,47 @@ def ensure_different_from_last(
         _log(f"[WIFI] Chua co lich su chay truoc, dung WiFi hien tai: '{current}'")
         return current
 
+    # WiFi dang None (mat ket noi) - thu ket noi lai truoc khi quyet dinh
+    if current is None:
+        target = get_next_wifi(last_run_wifi, wifi_1, wifi_2)
+        _log(f"[WIFI] Nhom truoc dung '{last_run_wifi}', hien tai la 'None'. Thu ket noi '{target}'...")
+        if switch_to_wifi(target):
+            current = get_current_wifi()
+            _log(f"[WIFI] Ket noi thanh cong: '{current}'")
+            return current
+        _log(f"[WIFI] Khong the ket noi '{target}', thu ket noi lai '{last_run_wifi}'...")
+        if switch_to_wifi(last_run_wifi):
+            current = get_current_wifi()
+            _log(f"[WIFI] Ket noi lai '{last_run_wifi}' thanh cong")
+            return current
+        _log(f"[WIFI] Khong the ket noi WiFi nao. Can cho truoc khi chay.")
+        return None
+
     if current == last_run_wifi:
         target = get_next_wifi(current, wifi_1, wifi_2)
         _log(f"[WIFI] Nhom truoc dung '{last_run_wifi}', hien tai cung la '{current}' -> doi sang '{target}'")
-        success = switch_to_wifi(target)
-        if success:
-            current = get_current_wifi()
-        else:
-            _log(f"[WIFI] Khong the doi WiFi, tiep tuc voi '{current}'")
+        if switch_to_wifi(target):
+            return get_current_wifi()
+        # Switch that bai - kiem tra WiFi thuc su hien tai
+        actual = get_current_wifi()
+        if actual is not None:
+            # Van con ket noi mot WiFi nao do (thuong la WiFi cu), tiep tuc voi no
+            _log(f"[WIFI] Khong the doi sang '{target}', tiep tuc voi '{actual}'")
+            return actual
+        # WiFi mat ket noi (None) sau khi thu chuyen - ket noi lai WiFi cu
+        _log(
+            f"[WIFI] Khong the doi sang '{target}', WiFi hien tai: 'None'. "
+            f"Thu ket noi lai '{last_run_wifi}'..."
+        )
+        if switch_to_wifi(last_run_wifi):
+            actual = get_current_wifi()
+            _log(f"[WIFI] Ket noi lai '{last_run_wifi}' thanh cong")
+            return actual
+        _log(f"[WIFI] Khong the ket noi ca '{target}' lan '{last_run_wifi}'. Can cho truoc khi chay.")
+        return None
     else:
         _log(f"[WIFI] Nhom truoc dung '{last_run_wifi}', hien tai la '{current}' -> khong can doi")
-
-    return current
+        return current
 
 
 # ============================================================
