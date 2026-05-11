@@ -77,7 +77,8 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
 
     Chien luoc chong nhau-phien-ban:
       - Tim tat ca span ten chat bang OR selector (tuong thich ca 2 phien ban HTML)
-      - Khi tim thay span khop, traverse len ancestor div[role="treeitem"] de click
+      - Khi tim thay span khop, chi click ancestor GAN NHAT: div[data-inp=...switch] neu co,
+        neu khong thi div[role=treeitem] gan nhat — khong click span tho de tranh mo nham chat
       - Khong phu thuoc vao cac attribute phu (data-testid, data-fui-tree-item-value...)
 
     Args:
@@ -139,13 +140,41 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
         chosen_index, chosen_title = exact_matches[0]
         _log(f"[TEAMS] Tim thay (exact match): '{chosen_title}' (vi tri {chosen_index + 1}/{count})")
 
-        # Click vao div[data-inp="simple-collab-chat-switch"] - phan tu co click handler
-        # thuc su de chuyen chat, nam ben trong treeitem
         span = title_spans.nth(chosen_index)
+        await span.scroll_into_view_if_needed()
+
+        # Chi click phan tu la ANCESTOR GAN NHAT cua dung span ten da match — khong click
+        # span tho (de tranh trung/lach) va khong dung .first tren day ancestor (co the map xa).
+        # XPath ancestor::*[1] = node gan span nhat theo truc ancestor (thuong la dung hang chat).
         chat_switch = span.locator(
-            'xpath=ancestor::div[@data-inp="simple-collab-chat-switch"]'
-        ).first
-        await chat_switch.click()
+            'xpath=./ancestor::div[@data-inp="simple-collab-chat-switch"][1]'
+        )
+        row_treeitem = span.locator(
+            'xpath=./ancestor::div[@role="treeitem"][1]'
+        )
+
+        clicked = False
+        for label, loc in (
+            ("data-inp=simple-collab-chat-switch (gan span ten)", chat_switch),
+            ("role=treeitem gan nhat (hang list)", row_treeitem),
+        ):
+            try:
+                if await loc.count() == 0:
+                    continue
+                await loc.click(timeout=8000)
+                _log(f"[TEAMS] Da click dung hang chat qua: {label}")
+                clicked = True
+                break
+            except Exception as ex:
+                _log(f"[TEAMS] Thu click ({label}) that bai: {ex}")
+
+        if not clicked:
+            _log(
+                "[TEAMS] LOI: Khong the click vao hang chat (switch div hoac treeitem gan span). "
+                "Khong thu click span de tranh mo nham chat khac."
+            )
+            return False
+
         await page.wait_for_timeout(2000)
         return True
 
