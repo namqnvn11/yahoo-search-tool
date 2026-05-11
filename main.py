@@ -2,7 +2,7 @@
 main.py - Chuong trinh chinh: doc sheet, lap lich va thuc hien search Yahoo Japan.
 
 Su dung:
-    python main.py               # Chay tuan tu, moi nhom cach nhau ngau nhien 50-70 phut (tu dong tiep tuc khi restart)
+    python main.py               # Chay tuan tu, moi task search cach nhau ngau nhien 50-70 phut (tu dong tiep tuc khi restart)
     python main.py --all         # Chay tat ca cac nhom lien tuc (khong doi)
     python main.py --test-sheet  # Chi hien thi du lieu tu sheet, khong search
     python main.py --test-teams  # Gui tin nhan test vao Teams va thoat
@@ -235,12 +235,12 @@ def update_daily_log(results: list[dict]) -> None:
         data = json.load(f)
 
     result_map = {
-        (r["hour"], r["keyword"], r["device_type"]): r
+        (r["hour"], r["keyword"], r["device_type"], r["should_click"]): r
         for r in results
     }
 
     for task in data.get("tasks", []):
-        key = (task["hour"], task["keyword"], task["device_type"])
+        key = (task["hour"], task["keyword"], task["device_type"], task["should_click"])
         if key in result_map:
             r = result_map[key]
             task["status"] = r["status"]
@@ -311,7 +311,7 @@ def load_last_wifi_ssid_from_log() -> str | None:
 
 
 def get_last_completion_time() -> datetime | None:
-    """Doc log, tra ve thoi diem hoan thanh task gan nhat (timestamp moi nhat trong cac task success)."""
+    """Doc log, tra ve thoi diem task gan nhat da chay xong (success hoac failed)."""
     log_file = get_log_path()
     if not log_file.exists():
         return None
@@ -322,25 +322,25 @@ def get_last_completion_time() -> datetime | None:
     timestamps = [
         datetime.fromisoformat(t["timestamp"])
         for t in data.get("tasks", [])
-        if t.get("status") == "success" and t.get("timestamp")
+        if t.get("timestamp")
     ]
     return max(timestamps) if timestamps else None
 
 
-def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
-    """Chay cac task cho mot nhom (khung gio cu the)."""
-    if hour not in tasks_by_hour:
-        print(f"[INFO] Khong co task nao cho nhom {hour}:00")
-        return
+def flatten_tasks_by_hour(tasks_by_hour: dict[int, list[SearchTask]]) -> list[SearchTask]:
+    """Tra ve danh sach task theo thu tu khung gio va thu tu xuat hien trong moi nhom."""
+    ordered_tasks: list[SearchTask] = []
+    for hour in sorted(tasks_by_hour.keys()):
+        ordered_tasks.extend(tasks_by_hour[hour])
+    return ordered_tasks
 
-    tasks = tasks_by_hour[hour]
-    print(f"\n{'='*60}")
-    print(f"  NHOM {hour}:00 - {len(tasks)} task(s)")
-    print(f"{'='*60}")
 
-    for t in tasks:
-        click_str = "CLICK" if t.should_click else "NO CLICK"
-        print(f"  - [{t.device_type}] [{click_str}] {t.keyword}")
+def execute_task_batch(config: dict, tasks: list[SearchTask]) -> list[dict]:
+    """Chay mot batch task va cap nhat log ngay sau khi xong."""
+    if not tasks:
+        return []
+
+    hour = tasks[0].hour
 
     wifi_1 = config.get("wifi_1", "")
     wifi_2 = config.get("wifi_2", "")
@@ -403,7 +403,7 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
 
         if session_wifi is None:
             print(f"[WIFI] Van khong co WiFi sau {wait_mins} phut. Bo qua nhom {hour}:00.")
-            return
+            return []
 
         print(f"[WIFI] Nhom nay se dung: '{session_wifi}'")
         ensure_edge_running(config)
@@ -428,6 +428,28 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
             enable_ethernet(disabled_adapters)
 
     update_daily_log(results)
+    return results
+
+
+def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
+    """Chay cac task cho mot nhom (khung gio cu the)."""
+    if hour not in tasks_by_hour:
+        print(f"[INFO] Khong co task nao cho nhom {hour}:00")
+        return
+
+    tasks = tasks_by_hour[hour]
+    print(f"\n{'='*60}")
+    print(f"  NHOM {hour}:00 - {len(tasks)} task(s)")
+    print(f"{'='*60}")
+
+    for t in tasks:
+        click_str = "CLICK" if t.should_click else "NO CLICK"
+        print(f"  - [{t.device_type}] [{click_str}] {t.keyword}")
+
+    results = execute_task_batch(config, tasks)
+    if not results:
+        return
+
     print(f"\n[OK] Hoan thanh tat ca task cho khung gio {hour}:00")
 
     # Gui thong bao Teams (neu da cau hinh)
@@ -443,17 +465,28 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
 
 def run_scheduled(config: dict, tasks_by_hour: dict):
     """
-    Chay tuan tu cac nhom task, moi nhom cach nhau ngau nhien 50-70 phut tinh tu lan hoan thanh truoc.
+    Chay tuan tu tung task search, moi task cach nhau ngau nhien 50-70 phut
+    tinh tu lan hoan thanh truoc.
 
     Neu chuong trinh bi ngat va khoi dong lai, doc log de biet lan cuoi chay luc nao
     va tinh thoi gian cho den luot tiep theo.
     """
-    groups = sorted(tasks_by_hour.keys())  # danh sach hour con pending, theo thu tu
-    total_tasks = sum(len(tasks_by_hour[h]) for h in groups)
+    groups = sorted(tasks_by_hour.keys())
+    ordered_tasks = flatten_tasks_by_hour(tasks_by_hour)
+    total_tasks = len(ordered_tasks)
+    remaining_by_hour = {
+        hour: len(tasks_by_hour[hour])
+        for hour in groups
+    }
+    results_by_hour = {
+        hour: []
+        for hour in groups
+    }
+
     print(f"[INFO] {len(groups)} nhom can chay, {total_tasks} task con lai.")
 
-    for i, hour in enumerate(groups):
-        # Kiem tra thoi diem co the chay nhom nay
+    for i, task in enumerate(ordered_tasks):
+        # Kiem tra thoi diem co the chay task nay
         last_done = get_last_completion_time()
 
         if last_done is not None:
@@ -465,14 +498,35 @@ def run_scheduled(config: dict, tasks_by_hour: dict):
             if wait_secs > 0:
                 wait_mins = int(wait_secs // 60)
                 wait_secs_rem = int(wait_secs % 60)
-                remaining_groups = groups[i:]
                 print(f"\n[INFO] Lan cuoi hoan thanh luc {last_done.strftime('%H:%M:%S')}.")
-                print(f"[INFO] Khoang cach nhom: {gap_minutes} phut (ngau nhien 50-70).")
+                print(f"[INFO] Khoang cach task: {gap_minutes} phut (ngau nhien 50-70).")
                 print(f"[INFO] Cho {wait_mins} phut {wait_secs_rem} giay den {next_run_at.strftime('%H:%M:%S')}...")
-                print(f"[INFO] Cac nhom con lai: {len(remaining_groups)} nhom")
+                print(f"[INFO] Cac task con lai: {total_tasks - i}")
                 time.sleep(wait_secs)
 
-        run_hour_tasks(config, tasks_by_hour, hour)
+        click_str = "CLICK" if task.should_click else "NO CLICK"
+        print(f"\n{'='*60}")
+        print(f"  TASK {i + 1}/{total_tasks} - KHUNG GIO {task.hour}:00")
+        print(f"{'='*60}")
+        print(f"  - [{task.device_type}] [{click_str}] {task.keyword}")
+
+        results = execute_task_batch(config, [task])
+        if not results:
+            continue
+
+        results_by_hour[task.hour].extend(results)
+        remaining_by_hour[task.hour] -= len(results)
+
+        if remaining_by_hour[task.hour] == 0:
+            print(f"\n[OK] Hoan thanh tat ca task cho khung gio {task.hour}:00")
+            teams_chat = config.get("teams_chat_name", "")
+            if teams_chat:
+                notify_hour_complete(
+                    hour=task.hour,
+                    results=results_by_hour[task.hour],
+                    chat_name=teams_chat,
+                    teams_exe=config.get("teams_exe", ""),
+                )
 
     print(f"\n{'='*60}")
     print("  DA HOAN THANH TAT CA TASK TRONG NGAY!")
@@ -655,7 +709,7 @@ def main():
         print("  DA HOAN THANH TAT CA TASK!")
         print(f"{'='*60}")
     else:
-        # Che do mac dinh: chay tuan tu, moi nhom cach nhau ngau nhien 50-70 phut
+        # Che do mac dinh: chay tuan tu, moi task search cach nhau ngau nhien 50-70 phut
         run_scheduled(config, tasks_by_hour)
 
 
