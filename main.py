@@ -29,6 +29,7 @@ from searcher import execute_tasks
 from teams_notifier import notify_hour_complete
 
 LOG_DIR = Path("logs")
+GROUP_GAP_MINUTES = [50, 55, 60, 65, 70]
 
 
 def load_config() -> dict:
@@ -457,7 +458,8 @@ def run_hour_tasks(config: dict, tasks_by_hour: dict, hour: int):
 
 def run_scheduled(config: dict, tasks_by_hour: dict):
     """
-    Chay tuan tu cac nhom search, moi nhom cach nhau ngau nhien 50-70 phut
+    Chay tuan tu cac nhom search, moi nhom cach nhau ngau nhien theo moc
+    50/55/60/65/70 phut
     tinh tu lan hoan thanh truoc.
 
     Neu chuong trinh bi ngat va khoi dong lai, doc log de biet lan cuoi chay luc nao
@@ -472,7 +474,7 @@ def run_scheduled(config: dict, tasks_by_hour: dict):
         last_done = get_last_completion_time()
 
         if last_done is not None:
-            gap_minutes = random.randint(50, 70)
+            gap_minutes = random.choice(GROUP_GAP_MINUTES)
             next_run_at = last_done + timedelta(minutes=gap_minutes)
             now = datetime.now()
             wait_secs = (next_run_at - now).total_seconds()
@@ -481,7 +483,7 @@ def run_scheduled(config: dict, tasks_by_hour: dict):
                 wait_mins = int(wait_secs // 60)
                 wait_secs_rem = int(wait_secs % 60)
                 print(f"\n[INFO] Lan cuoi hoan thanh luc {last_done.strftime('%H:%M:%S')}.")
-                print(f"[INFO] Khoang cach nhom: {gap_minutes} phut (ngau nhien 50-70).")
+                print(f"[INFO] Khoang cach nhom: {gap_minutes} phut (ngau nhien 50/55/60/65/70).")
                 print(f"[INFO] Cho {wait_mins} phut {wait_secs_rem} giay den {next_run_at.strftime('%H:%M:%S')}...")
                 print(f"[INFO] Cac nhom con lai: {len(groups) - i}")
                 time.sleep(wait_secs)
