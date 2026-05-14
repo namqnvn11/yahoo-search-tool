@@ -388,15 +388,12 @@ def execute_task_batch(config: dict, tasks: list[SearchTask]) -> list[dict]:
         from wifi_manager import ensure_different_from_last
         session_wifi = ensure_different_from_last(last_network, wifi_1, wifi_2)
 
-        if session_wifi is None:
+        # Bat buoc phai co WiFi moi chay - cho vo han, retry moi 5 phut
+        while session_wifi is None:
             wait_mins = 5
             print(f"[WIFI] WiFi khong co san. Cho {wait_mins} phut roi thu lai...")
             time.sleep(wait_mins * 60)
             session_wifi = ensure_different_from_last(last_network, wifi_1, wifi_2)
-
-        if session_wifi is None:
-            print(f"[WIFI] Van khong co WiFi sau {wait_mins} phut. Bo qua nhom {hour}:00.")
-            return []
 
         print(f"[WIFI] Nhom nay se dung: '{session_wifi}'")
         ensure_edge_running(config)
@@ -405,14 +402,37 @@ def execute_task_batch(config: dict, tasks: list[SearchTask]) -> list[dict]:
         print("\n[WIFI] Khong cau hinh WiFi rotation (WIFI_1_SSID/WIFI_2_SSID trong .env)")
         ensure_edge_running(config)
 
-    try:
-        results = asyncio.run(execute_tasks(
+    def _run_tasks() -> list[dict]:
+        return asyncio.run(execute_tasks(
             cdp_url=config["cdp_url"],
             tasks=tasks,
             mobile_ua=config["mobile_ua"],
             delay_between=5.0,
             session_wifi=session_wifi,
         ))
+
+    try:
+        try:
+            results = _run_tasks()
+        except Exception as e:
+            print(f"[BROWSER] Loi ket noi CDP / chay tasks: {e}")
+            print("[BROWSER] Kill Edge va mo lai roi thu lai...")
+            kill_edge()
+            ensure_edge_running(config)
+            try:
+                results = _run_tasks()
+            except Exception as e2:
+                print(f"[BROWSER] Van loi sau retry: {e2}")
+                print("[BROWSER] Danh dau tat ca task la failed va tiep tuc.")
+                results = [{
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "hour": t.hour,
+                    "keyword": t.keyword,
+                    "device_type": t.device_type,
+                    "should_click": t.should_click,
+                    "status": "failed",
+                    "wifi_ssid": session_wifi,
+                } for t in tasks]
     finally:
         # Luon bat lai ethernet sau khi dung WiFi de search
         if disabled_adapters:

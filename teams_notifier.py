@@ -183,6 +183,40 @@ async def _find_and_click_chat(page: Page, chat_name: str) -> bool:
         return False
 
 
+async def _find_and_click_chat_with_retry(
+    page: Page,
+    chat_name: str,
+    max_wait_seconds: int = 180,
+) -> bool:
+    """
+    Poll tim+click chat cho den khi thanh cong hoac het thoi gian.
+
+    Teams web la SPA load bang JS, khong the dua vao DOMContentLoaded de biet
+    trang da san sang. Tin hieu chac chan duy nhat la khi tim+click duoc chat
+    trong sidebar. Voi tab da mo san (lan thu 2 tro di trong ngay), thuong
+    thanh cong ngay lan dau. Voi tab moi mo (lan dau trong ngay / user lo
+    tay tat) co the can vai vong poll de Teams load xong.
+    """
+    start = datetime.now()
+    attempt = 0
+
+    while True:
+        attempt += 1
+        elapsed = (datetime.now() - start).total_seconds()
+        _log(f"[TEAMS] Lan thu {attempt} (sau {elapsed:.0f}s): tim chat '{chat_name}'...")
+
+        if await _find_and_click_chat(page, chat_name):
+            return True
+
+        elapsed = (datetime.now() - start).total_seconds()
+        if elapsed >= max_wait_seconds:
+            _log(f"[TEAMS] Het {max_wait_seconds}s ma chua tim duoc chat '{chat_name}'.")
+            return False
+
+        _log("[TEAMS] Chua tim duoc, cho 3s roi thu lai...")
+        await page.wait_for_timeout(3000)
+
+
 async def _type_and_send_message(page: Page, message: str, dry_run: bool = False) -> bool:
     """
     Nhap tin nhan vao CKEditor compose box va bam nut Send.
@@ -280,8 +314,8 @@ async def _async_send_message(cdp_url: str, chat_name: str, message: str, dry_ru
                 await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(3000)
 
-            # Buoc 1: Tim va click vao chat
-            found = await _find_and_click_chat(page, chat_name)
+            # Buoc 1: Tim va click vao chat (poll cho den khi Teams load xong)
+            found = await _find_and_click_chat_with_retry(page, chat_name)
             if not found:
                 return False
 
