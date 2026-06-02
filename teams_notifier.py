@@ -36,6 +36,15 @@ CHAT_TITLE_SPAN = (
     'span[data-tid="chat-list-item-title"]'
 )
 
+# Ten group dang mo o header (khung tieu de phia tren cuoc tro chuyen).
+# id that day du la "chat-header-19:<thread-id>@thread.v2" - phan thread-id thay
+# doi theo tung group nen KHONG hardcode. Chi dua vao prefix "chat-header-" (on dinh)
+# va lay <span title="..."> trong <h2> - title chua ten group hien thi day du.
+CHAT_HEADER_TITLE = (
+    'div[id^="chat-header-"] h2 span[title], '
+    'div[id^="chat-header-"] h2'
+)
+
 
 def _log(msg: str) -> None:
     """In ra console va ghi vao file log Teams."""
@@ -217,6 +226,52 @@ async def _find_and_click_chat_with_retry(
         await page.wait_for_timeout(3000)
 
 
+async def _verify_chat_header(page: Page, chat_name: str, timeout_ms: int = 10000) -> bool:
+    """
+    Kiem tra ten group dang mo o HEADER khop voi chat_name truoc khi gui.
+
+    Day la lop bao ve thu hai (sau buoc click chat o sidebar): du sidebar co
+    click nham hang khac, header van phai dung ten group thi moi cho gui. Tranh
+    gui nham tin nhan vao group khac.
+
+    Doc ten group theo thu tu uu tien:
+      1. Thuoc tinh `title` cua <span> trong <h2> (ten day du, on dinh nhat)
+      2. inner_text cua <h2> (fallback neu khong co span[title])
+
+    So khop: exact match, case-insensitive (giong logic tim chat o sidebar).
+
+    Returns:
+        True neu header khop chat_name, False neu khong khop / khong doc duoc.
+    """
+    chat_name_lower = chat_name.strip().lower()
+
+    try:
+        header = page.locator(CHAT_HEADER_TITLE).first
+        await header.wait_for(state="visible", timeout=timeout_ms)
+
+        # Uu tien thuoc tinh title (ten day du), neu khong co thi dung inner_text
+        header_title = await header.get_attribute("title")
+        if not header_title:
+            header_title = await header.inner_text()
+        header_title = (header_title or "").strip()
+
+        _log(f"[TEAMS] Header group hien tai: '{header_title}' (can: '{chat_name.strip()}')")
+
+        if header_title.lower() == chat_name_lower:
+            _log("[TEAMS] Header KHOP - dung group, cho phep gui.")
+            return True
+
+        _log(
+            f"[TEAMS] LOI: Header group '{header_title}' KHONG khop '{chat_name.strip()}'. "
+            f"Huy gui de tranh gui nham group."
+        )
+        return False
+
+    except Exception as e:
+        _log(f"[TEAMS] Loi khi doc header group: {e}. Huy gui de an toan.")
+        return False
+
+
 async def _type_and_send_message(page: Page, message: str, dry_run: bool = False) -> bool:
     """
     Nhap tin nhan vao CKEditor compose box va bam nut Send.
@@ -314,9 +369,40 @@ async def _async_send_message(cdp_url: str, chat_name: str, message: str, dry_ru
                 await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(3000)
 
-            # Buoc 1: Tim va click vao chat (poll cho den khi Teams load xong)
-            found = await _find_and_click_chat_with_retry(page, chat_name)
-            if not found:
+            # Buoc 1: Tim+click chat va XAC MINH header, lap toi da 3 lan.
+            # Neu header sai (vao nham group / chua load xong) -> quay lai tim chat.
+            MAX_VERIFY_ATTEMPTS = 3
+            verified = False
+            for attempt in range(1, MAX_VERIFY_ATTEMPTS + 1):
+                _log(f"[TEAMS] === Lan tim+xac minh group {attempt}/{MAX_VERIFY_ATTEMPTS} ===")
+
+                # Lan 1: cho lau (180s) de Teams load lan dau. Cac lan retry chi
+                # can 30s vi list conversation da load san.
+                wait_seconds = 180 if attempt == 1 else 30
+                found = await _find_and_click_chat_with_retry(
+                    page, chat_name, max_wait_seconds=wait_seconds
+                )
+                if not found:
+                    if attempt < MAX_VERIFY_ATTEMPTS:
+                        _log("[TEAMS] Khong tim duoc chat, thu lai...")
+                        await page.wait_for_timeout(1500)
+                        continue
+                    return False
+
+                # Xac minh ten group o header truoc khi gui (chong gui nham group)
+                if await _verify_chat_header(page, chat_name):
+                    verified = True
+                    break
+
+                if attempt < MAX_VERIFY_ATTEMPTS:
+                    _log("[TEAMS] Header sai, quay lai buoc tim group chat...")
+                    await page.wait_for_timeout(1500)
+
+            if not verified:
+                _log(
+                    f"[TEAMS] LOI: Sau {MAX_VERIFY_ATTEMPTS} lan van khong xac minh dung group "
+                    f"'{chat_name}'. Huy gui tin nhan."
+                )
                 return False
 
             # Buoc 2: Nhap tin nhan (co the khong gui neu dry_run)
