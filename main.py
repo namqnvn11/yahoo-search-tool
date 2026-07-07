@@ -47,6 +47,12 @@ def load_config() -> dict:
         "edge_executable": os.getenv("EDGE_EXECUTABLE_PATH", ""),
         "edge_user_data_dir": os.getenv("EDGE_USER_DATA_DIR", ""),
         "edge_profile_directory": os.getenv("EDGE_PROFILE_DIRECTORY", "Default"),
+        # Mac dinh BAT: clone profile tu thu muc mac dinh (hoac EDGE_SOURCE_USER_DATA_DIR)
+        # sang mot thu muc rieng o lan dau, de giu session/cookie ma van tranh
+        # bi Edge >= 136 chan remote debugging tren thu muc mac dinh.
+        # Dat EDGE_CLONE_FROM_DEFAULT=false trong .env neu muon tat.
+        "edge_clone_from_default": os.getenv("EDGE_CLONE_FROM_DEFAULT", "true").strip().lower() in ("1", "true", "yes"),
+        "edge_source_user_data_dir": os.getenv("EDGE_SOURCE_USER_DATA_DIR", "").strip(),
         "edge_port": port,
         "wifi_1": os.getenv("WIFI_1_SSID", "").strip(),
         "wifi_2": os.getenv("WIFI_2_SSID", "").strip(),
@@ -74,37 +80,248 @@ def load_config() -> dict:
         print(f"[ERROR] Khong tim thay file credentials: {config['credentials_file']}")
         print("Vui long dat file Google Service Account credentials JSON vao thu muc goc.")
         sys.exit(1)
-    
+
+    _normalize_profile_config(config)
+
     return config
+
+
+def get_default_clone_target_dir() -> str:
+    """Thu muc clone rieng mac dinh (khong phai thu muc mac dinh cua Edge)."""
+    local = os.getenv("LOCALAPPDATA", "")
+    base = local if local else str(Path.home())
+    return os.path.join(base, "EdgeAutomation", "User Data")
+
+
+def _normalize_profile_config(config: dict) -> None:
+    """
+    Khi bat clone (mac dinh), tu dong tach NGUON va DICH cho profile:
+      - Nguon (source)  = profile that dang co session (thu muc mac dinh cua Edge,
+                          hoac EDGE_USER_DATA_DIR neu no tro vao mac dinh,
+                          hoac EDGE_SOURCE_USER_DATA_DIR neu duoc chi dinh).
+      - Dich (target)   = thu muc clone RIENG (khong mac dinh) de Edge >= 136 khong chan.
+
+    Nho vay nguoi dung khong can sua .env: cu de EDGE_USER_DATA_DIR nhu cu (tro vao
+    thu muc mac dinh), tool se tu clone sang thu muc rieng va chay o do.
+    """
+    if not config.get("edge_clone_from_default"):
+        return
+
+    configured = config.get("edge_user_data_dir", "")
+    source = config.get("edge_source_user_data_dir", "")
+
+    # Xac dinh nguon: uu tien EDGE_SOURCE_USER_DATA_DIR, roi den configured neu no
+    # la thu muc mac dinh, cuoi cung la thu muc mac dinh cua Edge.
+    if not source:
+        if configured and points_to_default_edge_profile(configured):
+            source = configured
+        else:
+            source = get_default_edge_user_data_dir()
+
+    # Xac dinh dich: neu configured da la thu muc rieng (khong mac dinh) thi giu nguyen,
+    # nguoc lai dung thu muc clone rieng mac dinh.
+    if configured and not points_to_default_edge_profile(configured):
+        target = configured
+    else:
+        target = get_default_clone_target_dir()
+
+    config["edge_source_user_data_dir"] = source
+    config["edge_user_data_dir"] = target
+
+    if points_to_default_edge_profile(target):
+        # Truong hop hiem (khong xac dinh duoc thu muc rieng) -> tat clone de tranh vong lap
+        print("[CLONE] Khong the chon thu muc clone rieng, tat clone.")
+        config["edge_clone_from_default"] = False
+
+
+def get_cdp_version(cdp_url: str) -> dict | None:
+    """
+    Doc thong tin phien ban tu endpoint CDP (/json/version).
+    Tra ve dict (co 'Browser', 'User-Agent', ...) neu ket noi duoc, None neu khong.
+    """
+    try:
+        url = cdp_url.rstrip("/") + "/json/version"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            if resp.status != 200:
+                return None
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
 
 
 def is_cdp_port_open(cdp_url: str) -> bool:
     """Kiem tra xem trinh duyet co dang chay va lang nghe tren cong CDP khong."""
+    return get_cdp_version(cdp_url) is not None
+
+
+def get_default_edge_user_data_dir() -> str:
+    """Duong dan thu muc User Data mac dinh cua Edge tren Windows."""
+    local = os.getenv("LOCALAPPDATA", "")
+    if not local:
+        return ""
+    return os.path.join(local, "Microsoft", "Edge", "User Data")
+
+
+def points_to_default_edge_profile(user_data_dir: str) -> bool:
+    """
+    True neu user_data_dir chinh la thu muc User Data mac dinh cua Edge.
+
+    Tu Edge/Chrome 136, --remote-debugging-port bi BO QUA khi chay tren thu muc
+    profile mac dinh (bao mat chong trom cookie). Do la ly do cong debug khong mo
+    tren cac may da cap nhat Edge moi.
+    """
+    default = get_default_edge_user_data_dir()
+    if not user_data_dir or not default:
+        return False
     try:
-        url = cdp_url.rstrip("/") + "/json/version"
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            return resp.status == 200
+        return os.path.normcase(os.path.normpath(user_data_dir)) == \
+            os.path.normcase(os.path.normpath(default))
     except Exception:
         return False
 
 
-def kill_edge() -> None:
-    """
-    Tat tat ca tien trinh Edge dang chay ngam.
-    Goi truoc khi mo Edge moi de tranh xung dot cong CDP.
-    """
+def count_edge_processes() -> int:
+    """Dem so tien trinh msedge.exe dang chay."""
     try:
         result = subprocess.run(
-            ["taskkill", "/F", "/IM", "msedge.exe"],
+            ["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH"],
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0:
-            print("[BROWSER] Da tat cac tien trinh Edge cu.")
-            time.sleep(1)
-        # returncode 128 = khong tim thay process (Edge chua chay) -> bo qua
+        return result.stdout.lower().count("msedge.exe")
+    except Exception:
+        return 0
+
+
+def kill_edge() -> None:
+    """
+    Tat tat ca tien trinh Edge dang chay ngam (ca cay tien trinh con) va
+    CHO cho den khi chung that su bien mat.
+
+    Quan trong: neu con bat ky tien trinh msedge.exe nao con giu user-data-dir,
+    lenh mo Edge moi voi --remote-debugging-port se chi mo them 1 tab trong
+    instance cu roi thoat -> cong debug KHONG duoc mo -> ket noi CDP that bai.
+    Vi vay phai dam bao Edge tat han truoc khi mo lai.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/IM", "msedge.exe"],
+            capture_output=True,
+            text=True,
+        )
     except Exception as e:
         print(f"[BROWSER] Khong the tat Edge: {e}")
+        return
+
+    # Cho toi da 10s cho tien trinh Edge tat han (poll moi 0.5s).
+    for _ in range(20):
+        if count_edge_processes() == 0:
+            print("[BROWSER] Da tat het tien trinh Edge cu.")
+            return
+        time.sleep(0.5)
+    print("[BROWSER] Canh bao: van con tien trinh Edge sau khi taskkill.")
+
+
+def clone_edge_profile(source_user_data_dir: str, target_user_data_dir: str,
+                       profile_dir: str) -> bool:
+    """
+    Clone profile Edge tu thu muc nguon (thuong la thu muc mac dinh) sang thu muc
+    rieng de van giu session/cookie ma tranh bi Edge >= 136 chan remote debugging.
+
+    Copy:
+      - <source>/Local State   (chua khoa ma hoa cookie - BAT BUOC de giai ma cookie)
+      - <source>/<profile_dir> (cookie, dang nhap, ...), bo qua cache cho nhe.
+
+    Luu y: cookie duoc ma hoa bang DPAPI + App-Bound Encryption, gan voi TAI KHOAN
+    Windows + ung dung Edge, KHONG gan voi duong dan. Nen clone chi giai ma duoc khi
+    chay cung mot user Windows tren cung may. Copy sang may/user khac se mat session.
+    Edge phai DA DONG khi copy (file bi khoa neu Edge dang chay).
+
+    Tra ve True neu clone thanh cong (hoac da co san), False neu that bai.
+    """
+    import shutil
+
+    src_root = Path(source_user_data_dir)
+    dst_root = Path(target_user_data_dir)
+    src_profile = src_root / profile_dir
+    dst_profile = dst_root / profile_dir
+
+    if not src_profile.exists():
+        print(f"[CLONE] Khong tim thay profile nguon: {src_profile}")
+        return False
+
+    # Cac thu muc cache khong can copy (nang, tu tao lai)
+    ignore_names = {
+        "Cache", "Code Cache", "GPUCache", "GraphiteDawnCache", "DawnCache",
+        "DawnGraphiteCache", "DawnWebGPUCache", "Service Worker", "CacheStorage",
+        "Application Cache", "ShaderCache", "GrShaderCache", "component_crx_cache",
+    }
+    ignore = shutil.ignore_patterns(*ignore_names)
+
+    try:
+        dst_root.mkdir(parents=True, exist_ok=True)
+
+        # 1. Local State (chua khoa ma hoa) - bat buoc
+        src_local_state = src_root / "Local State"
+        if src_local_state.exists():
+            shutil.copy2(src_local_state, dst_root / "Local State")
+            print("[CLONE] Da copy Local State (khoa ma hoa cookie).")
+        else:
+            print("[CLONE] Canh bao: khong thay Local State o nguon, cookie co the khong giai ma duoc.")
+
+        # 2. Thu muc profile
+        print(f"[CLONE] Dang copy profile '{profile_dir}' (bo qua cache)...")
+        if dst_profile.exists():
+            shutil.rmtree(dst_profile, ignore_errors=True)
+        shutil.copytree(src_profile, dst_profile, ignore=ignore, dirs_exist_ok=True)
+
+        print(f"[CLONE] Da clone profile sang: {dst_root}")
+        return True
+    except Exception as e:
+        print(f"[CLONE] Loi khi clone profile: {e}")
+        print("[CLONE] Dam bao Edge da dong hoan toan truoc khi clone.")
+        return False
+
+
+def maybe_clone_profile(config: dict) -> None:
+    """
+    Neu bat EDGE_CLONE_FROM_DEFAULT va thu muc dich chua co profile, thi clone tu
+    thu muc nguon (mac dinh Edge hoac EDGE_SOURCE_USER_DATA_DIR) sang.
+    Chi clone 1 lan (khi thu muc dich chua ton tai profile).
+    """
+    if not config.get("edge_clone_from_default"):
+        return
+
+    target = config["edge_user_data_dir"]
+    profile_dir = config["edge_profile_directory"] or "Default"
+
+    if not target:
+        print("[CLONE] Bo qua clone: chua dat EDGE_USER_DATA_DIR (thu muc dich).")
+        return
+
+    if points_to_default_edge_profile(target):
+        print("[CLONE] Bo qua clone: EDGE_USER_DATA_DIR van la thu muc MAC DINH "
+              "(clone khong co tac dung, van bi chan). Hay doi sang thu muc rieng.")
+        return
+
+    # Da co profile o dich roi -> khong clone lai (tranh ghi de session moi)
+    if (Path(target) / profile_dir).exists():
+        return
+
+    source = config.get("edge_source_user_data_dir") or get_default_edge_user_data_dir()
+    if not source:
+        print("[CLONE] Bo qua clone: khong xac dinh duoc thu muc nguon.")
+        return
+
+    print(f"[CLONE] Lan dau: clone profile de giu session.")
+    print(f"[CLONE]   Nguon: {source}")
+    print(f"[CLONE]   Dich : {target}")
+
+    # Edge phai dong truoc khi copy (file bi khoa neu dang chay)
+    kill_edge()
+    ok = clone_edge_profile(source, target, profile_dir)
+    if not ok:
+        print("[CLONE] Clone that bai. Se chay voi profile moi (co the phai dang nhap lai).")
 
 
 def ensure_edge_running(config: dict) -> None:
@@ -117,13 +334,11 @@ def ensure_edge_running(config: dict) -> None:
     cdp_url = config["cdp_url"]
 
     # Neu Edge da dang chay va CDP endpoint dang phan hoi thi dung luon, tranh kill khong can thiet.
-    if is_cdp_port_open(cdp_url):
+    existing = get_cdp_version(cdp_url)
+    if existing is not None:
         print(f"[BROWSER] Edge da san sang (CDP OK): {cdp_url}")
+        print(f"[BROWSER] Phien ban: {existing.get('Browser', '?')}")
         return
-
-    kill_edge()
-
-    print(f"[BROWSER] Dang mo Edge moi tren {cdp_url}...")
 
     edge_exe = config["edge_executable"]
     if not edge_exe or not os.path.exists(edge_exe):
@@ -131,29 +346,83 @@ def ensure_edge_running(config: dict) -> None:
         print("Vui long kiem tra EDGE_EXECUTABLE_PATH trong .env")
         sys.exit(1)
 
+    # Neu bat clone: lan dau se copy profile mac dinh sang thu muc rieng de giu session.
+    maybe_clone_profile(config)
+
+    user_data_dir = config["edge_user_data_dir"]
+
+    # Canh bao truoc: Edge/Chrome >= 136 BO QUA --remote-debugging-port khi chay
+    # tren thu muc profile mac dinh. Day la nguyen nhan "may duoc may khong".
+    using_default_dir = points_to_default_edge_profile(user_data_dir)
+    if using_default_dir:
+        print("[BROWSER] *** CANH BAO ***")
+        print(f"[BROWSER] EDGE_USER_DATA_DIR dang tro vao thu muc MAC DINH cua Edge:")
+        print(f"[BROWSER]   {user_data_dir}")
+        print("[BROWSER] Tu Edge/Chrome 136, remote debugging BI CHAN tren thu muc mac dinh.")
+        print("[BROWSER] Neu may nay da cap nhat Edge moi, cong CDP se KHONG mo duoc.")
+        print("[BROWSER] Cach sua: doi EDGE_USER_DATA_DIR sang thu muc rieng (khong mac dinh),")
+        print("[BROWSER] vi du: C:\\EdgeAutomation\\UserData")
+
     cmd = [
         edge_exe,
         f"--remote-debugging-port={config['edge_port']}",
         "--no-first-run",
         "--no-default-browser-check",
     ]
-    if config["edge_user_data_dir"]:
-        cmd.append(f"--user-data-dir={config['edge_user_data_dir']}")
+    if user_data_dir:
+        cmd.append(f"--user-data-dir={user_data_dir}")
     if config["edge_profile_directory"]:
         cmd.append(f"--profile-directory={config['edge_profile_directory']}")
 
-    subprocess.Popen(cmd)
+    print(f"[BROWSER] Lenh mo Edge: {' '.join(cmd)}")
 
-    print("[BROWSER] Dang cho Edge khoi dong", end="", flush=True)
-    for _ in range(15):
-        time.sleep(1)
-        print(".", end="", flush=True)
-        if is_cdp_port_open(cdp_url):
-            print(" San sang!")
+    # Thu toi da 3 lan: dam bao tat het Edge cu -> mo moi -> cho cong CDP mo.
+    # Retry vi doi khi Edge moi bi "forward" vao instance cu con sot lai va thoat
+    # ngay, khien cong debug khong mo o lan dau.
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        kill_edge()
+
+        print(f"[BROWSER] Dang mo Edge moi tren {cdp_url} (lan {attempt}/{max_attempts})...")
+        proc = subprocess.Popen(cmd)
+
+        print("[BROWSER] Dang cho Edge khoi dong", end="", flush=True)
+        version = None
+        for _ in range(30):
+            time.sleep(1)
+            print(".", end="", flush=True)
+            version = get_cdp_version(cdp_url)
+            if version is not None:
+                break
+            # Neu tien trinh vua mo da thoat som (bi forward vao instance cu)
+            # thi khong can cho het 30s - kill lai va thu lan nua.
+            if proc.poll() is not None and count_edge_processes() == 0:
+                print(" (Edge thoat som)", end="", flush=True)
+                break
+        print()
+
+        if version is not None:
+            print("[BROWSER] Edge da san sang (CDP OK).")
+            print(f"[BROWSER] Phien ban: {version.get('Browser', '?')}")
             return
 
-    print()
-    print(f"[ERROR] Edge khong phan hoi sau 15 giay. Kiem tra lai cau hinh.")
+        # Log ro trang thai de chan doan
+        edge_alive = count_edge_processes() > 0
+        print(f"[BROWSER] Lan {attempt}/{max_attempts}: cong CDP chua mo "
+              f"(tien trinh Edge {'CON chay' if edge_alive else 'DA thoat'}).")
+        if edge_alive and using_default_dir:
+            # Edge dang chay nhung khong mo cong -> gan nhu chac chan la chan boi 136.
+            print("[BROWSER] -> Edge chay nhung khong mo cong debug: dung dau hieu bi chan boi Edge >= 136 "
+                  "do dung thu muc profile mac dinh.")
+
+    print(f"[ERROR] Edge khong mo duoc cong CDP sau {max_attempts} lan thu.")
+    print("[ERROR] Nguyen nhan thuong gap:")
+    if using_default_dir:
+        print("  - (KHA NANG CAO) Edge >= 136 chan remote debugging tren thu muc profile MAC DINH.")
+        print("    => Doi EDGE_USER_DATA_DIR sang thu muc rieng, vi du C:\\EdgeAutomation\\UserData")
+    print("  - Con tien trinh Edge cu giu user-data-dir (tat thu cong roi chay lai).")
+    print("  - EDGE_USER_DATA_DIR hoac EDGE_EXECUTABLE_PATH sai trong .env.")
+    print("  - Cong debug bi ung dung khac chiem (doi EDGE_REMOTE_DEBUGGING_PORT).")
     sys.exit(1)
 
 
@@ -546,6 +815,12 @@ def main():
     print(f"[INFO] User: {config['user_name']}")
     print(f"[INFO] Sheet ID: {config['sheet_id'][:20]}...")
     print(f"[INFO] CDP URL: {config['cdp_url']}")
+    if config.get("edge_clone_from_default"):
+        print(f"[INFO] Clone profile: BAT")
+        print(f"[INFO]   Nguon (session): {config.get('edge_source_user_data_dir')}")
+        print(f"[INFO]   Dich (chay tren): {config.get('edge_user_data_dir')}")
+    else:
+        print(f"[INFO] Edge user-data-dir: {config.get('edge_user_data_dir')}")
     print(f"[INFO] Ngay: {date.today().strftime('%d/%m/%Y')}")
 
     # Che do test WiFi

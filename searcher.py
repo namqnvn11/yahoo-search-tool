@@ -59,11 +59,28 @@ ANTI_DETECTION_SCRIPT = """
 """
 
 
-async def connect_to_browser(cdp_url: str) -> Browser:
-    """Ket noi vao trinh duyet Edge dang chay qua CDP."""
+async def connect_to_browser(cdp_url: str, retries: int = 3, delay: float = 2.0) -> Browser:
+    """
+    Ket noi vao trinh duyet Edge dang chay qua CDP.
+
+    Thu lai vai lan vi doi khi cong CDP vua mo nhung endpoint chua san sang
+    hoan toan (Edge con dang khoi tao), khien lan connect dau tien that bai.
+    """
     pw = await async_playwright().start()
-    browser = await pw.chromium.connect_over_cdp(cdp_url)
-    return browser
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            browser = await pw.chromium.connect_over_cdp(cdp_url)
+            return browser
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                print(f"  [BROWSER] Connect CDP that bai (lan {attempt}/{retries}): {e}. Thu lai sau {delay}s...")
+                await asyncio.sleep(delay)
+
+    # Het luot thu, dong playwright va nem loi de tang tren xu ly (kill + mo lai Edge)
+    await pw.stop()
+    raise RuntimeError(f"Khong the ket noi CDP sau {retries} lan: {last_err}")
 
 
 async def scroll_to_bottom(page: Page, steps: int = 5, delay: float = 0.5):
